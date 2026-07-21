@@ -1,0 +1,50 @@
+[project]
+name = "dbt-walker"
+version = "0.3.1"
+description = "CLI for traversing dbt model- and column-level lineage to plan full refreshes"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "src/dbt_walker/_vendor/mermaid.LICENSE"]
+authors = [{ name = "Huey" }]
+requires-python = ">=3.10"
+keywords = ["dbt", "lineage", "data-engineering", "impact-analysis", "column-lineage", "incremental", "full-refresh", "dag"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Quality Assurance",
+]
+# v0 is stdlib-only on purpose: it must run anywhere a manifest.json exists.
+# Column-level lineage adds sqlglot via the [col] extra.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Hugs401/dbt-walker"
+Repository = "https://github.com/Hugs401/dbt-walker"
+Issues = "https://github.com/Hugs401/dbt-walker/issues"
+
+[project.optional-dependencies]
+col = ["sqlglot>=25"]
+dev = ["pytest", "dbt-core", "dbt-duckdb", "sqlglot>=25", "playwright"]
+
+[project.scripts]
+dbt-walker = "dbt_walker.cli:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# the lineage app inlines mermaid so it works offline; ship it (and its
+# license) in the wheel
+[tool.setuptools.package-data]
+dbt_walker = ["_vendor/*.js", "_vendor/*.LICENSE"]

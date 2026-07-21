@@ -1,0 +1,16 @@
+name: retail
+profile: retail
+config-version: 2
+version: '1.0'
+model-paths: ["models"]
+seed-paths: ["seeds"]
+
+flags:
+  send_anonymous_usage_stats: false
+
+models:
+  retail:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

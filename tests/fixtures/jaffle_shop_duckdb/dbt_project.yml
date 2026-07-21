@@ -1,0 +1,39 @@
+name: 'jaffle_shop'
+
+config-version: 2
+version: '0.1'
+
+profile: 'jaffle_shop'
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+analysis-paths: ["analysis"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets:
+    - "target"
+    - "dbt_modules"
+    - "logs"
+
+require-dbt-version: [">=1.11.0", "<2.0.0"]
+
+seeds: 
+  +docs:
+    node_color: '#cd7f32'
+
+# NOTE: orders is patched to incremental (vs. upstream jaffle_shop_duckdb) so the
+# fixture exercises dbt-walker's incremental / on_schema_change handling.
+models:
+  jaffle_shop:
+    +materialized: table
+    orders:
+      +materialized: incremental
+      +on_schema_change: append_new_columns
+    staging:
+      +materialized: view
+      +docs:
+        node_color: 'silver'
+    +docs:
+      node_color: 'gold'

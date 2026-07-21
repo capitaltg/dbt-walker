@@ -1,0 +1,36 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+*.duckdb
+
+# `dbt-walker graph --format html` output
+graphs/
+
+# dbt fixture build outputs — regenerate with `dbt build --profiles-dir .` there
+tests/fixtures/jaffle_shop_duckdb/target/
+tests/fixtures/jaffle_shop_duckdb/logs/
+tests/fixtures/jaffle_shop_duckdb/*.duckdb
+tests/fixtures/jaffle_shop_duckdb/dbt_packages/
+
+# generated + fetched fixtures (built on demand by scripts/ — see README)
+tests/fixtures/generated/
+tests/fixtures/real/
+
+# example project build output (rebuild with: dbt build --profiles-dir .)
+examples/**/target/
+examples/**/logs/
+examples/**/dbt_packages/
+
+# build-app output + wheel builds
+*-lineage-*.html
+app.html
+*-usage.html
+
+# local working notes / AI-assistant config (not part of the public repo)
+CLAUDE.md
+HANDOFF.md
+.claude/
+plans/
