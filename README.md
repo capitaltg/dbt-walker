@@ -6,17 +6,17 @@ every incremental on that path still holds rows built with the *old* logic
 until someone full-refreshes it. dbt-walker reads dbt's own artifacts (never
 your warehouse) and answers with **one ordered drop list**: every incremental
 on the change's lineage — upstream, the target, and downstream — with the exact
-`DROP ... CASCADE` DDL and dbt commands to run. Column-level, so changing one
+`DROP TABLE` DDL and dbt commands to run. Column-level, so changing one
 column usually touches far fewer models than the whole thing.
 
-![The lineage explorer in Impact mode: changing one column in a model produces an ordered drop list of the incrementals on its lineage — upstream, target, and downstream — each with the DROP CASCADE DDL and dbt commands to copy.](https://raw.githubusercontent.com/Hugs401/dbt-walker/main/docs/img/app-impact.png)
+![The lineage explorer in Impact mode: changing one column in a model produces an ordered drop list of the incrementals on its lineage, grouped under one heading per position — upstream, target, and downstream — each with the DROP TABLE DDL and dbt commands to copy.](https://raw.githubusercontent.com/Hugs401/dbt-walker/main/docs/img/app-impact.png)
 
 *The visual explorer in Impact mode — changing `col_0` in `int_38`. The **drop
-list** names the incrementals on that column's lineage (`int_11`, `int_24`
-upstream; `int_38` the target), each tagged and marked with a DROP badge in the
-graph, with the `DROP TABLE ... CASCADE` DDL and dbt commands ready to copy.
-The graph traces `col_0` back through the chain; the SQL pane highlights the
-line that produces it.*
+list** names the incrementals on that column's lineage, grouped under one
+heading per position (`int_11`, `int_24` upstream; `int_38` the target), each
+group's `DROP TABLE` statements ready to copy and each model badged in the
+graph. The graph traces `col_0` back through the chain; the SQL pane highlights
+the line that produces it.*
 
 ## Highlights
 
@@ -33,8 +33,9 @@ line that produces it.*
   unproven — the tool never claims "safe" without proof.
 - **A merged, ordered drop list.** `impact` gives you one topologically-ordered
   list of the incrementals to drop — upstream, target, and downstream — each
-  tagged and carrying its `DROP TABLE schema.table CASCADE;`. Under `--additive`,
-  incrementals that can just *add* the new column move to a separate bucket.
+  carrying its `DROP TABLE schema.table;` (grouped under one heading per position
+  in the app). Under `--additive`, incrementals that can just *add* the new
+  column move to a separate bucket.
 - **A one-file visual explorer** (`build-app`): a self-contained HTML page with
   the model tree, pan/zoom lineage graph, the drop-list plan, and SQL with the
   producing lines highlighted. Fully offline (mermaid is bundled, no CDN) —
@@ -54,7 +55,7 @@ Or as a standalone tool via [pipx](https://pipx.pypa.io/):
 
 ```bash
 python -m build --wheel                       # writes dist/dbt_walker-*.whl
-pipx install "dist/dbt_walker-0.4.0-py3-none-any.whl[col]"
+pipx install "dist/dbt_walker-0.4.1-py3-none-any.whl[col]"
 ```
 
 Requires Python 3.10+.
@@ -75,8 +76,7 @@ dbt-walker impact stg_orders --additive          # adding a column: append/sync
 
 `impact` prints one topologically-ordered **DROP THESE** list — every
 incremental on the change's lineage, tagged `upstream` / `target` /
-`downstream`, each with its `DROP TABLE schema.table CASCADE;` (and the
-downstream views a CASCADE would take out). Below it: what rebuilds for free,
+`downstream`, each with its `DROP TABLE schema.table;`. Below it: what rebuilds for free,
 the tests that re-run, and the safe dbt alternative
 (`dbt run --select <models> --full-refresh` + `dbt build --select <model>+`).
 A dropped incremental is rebuilt in full by the next scheduled run. Add

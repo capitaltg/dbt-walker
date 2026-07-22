@@ -203,6 +203,27 @@ def test_unqualified_column_over_join_fails_closed():
     assert r["total"] == [(None, "", "unknown")]
 
 
+def test_qualified_star_over_join_resolves_by_name():
+    """The DMS/SCD dedup pattern: `select src.* ... left join ... qualify
+    row_number()=1` provably projects ONLY src's columns, so a column named in
+    the outer select traces through src to its source -- not a fail-closed
+    unknown. A *bare* `*` over a join stays ambiguous (see the test above)."""
+    sql = (
+        "with initial as (select * from db.sch.raw), "
+        "deduped as ("
+        "  select src.* from initial as src "
+        "  left join db.sch.tgt as tgt on src.id = tgt.id "
+        "  qualify row_number() over (partition by src.id order by src.seq desc) = 1"
+        ") "
+        "select id, employment_eligibility_type from deduped"
+    )
+    r = _cols(sql)
+    assert r is not None
+    assert r["id"] == [("db.sch.raw", "id", "passthrough")]
+    assert r["employment_eligibility_type"] == \
+        [("db.sch.raw", "employment_eligibility_type", "passthrough")]
+
+
 # ------------------------------------------------------- catalog.json (schema)
 
 _SCHEMA = {"db": {"sch": {
@@ -853,7 +874,7 @@ def test_drop_list_positions_and_db_less_ddl():
         [("up", "upstream"), ("tgt", "target"), ("down", "downstream")]  # topo order
     for e in drop:
         assert e["relation"].startswith("analytics.") and "warehouse" not in e["relation"]
-        assert e["statement"] == f"DROP TABLE analytics.{e['model']} CASCADE;"
+        assert e["statement"] == f"DROP TABLE analytics.{e['model']};"
 
 
 def test_missing_sqlglot_gives_install_hint(monkeypatch):

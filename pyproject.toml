@@ -1,6 +1,6 @@
 [project]
 name = "dbt-walker"
-version = "0.4.0"
+version = "0.4.1"
 description = "CLI for traversing dbt model- and column-level lineage to plan full refreshes"
 readme = "README.md"
 license = "MIT"

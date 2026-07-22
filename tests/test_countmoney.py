@@ -41,9 +41,9 @@ def test_impact_json_has_all_contract_keys():
     # drop-list entries, if any, are well-formed and position-tagged
     for entry in result["drop_list"]:
         assert entry["statement"].startswith("DROP TABLE ")
+        assert "CASCADE" not in entry["statement"]
         assert entry["position"] in ("upstream", "target", "downstream")
-        assert set(entry) == {"model", "name", "position", "relation",
-                              "statement", "cascade_drops_views"}
+        assert set(entry) == {"model", "name", "position", "relation", "statement"}
 
 
 @needs(COUNTMONEY, FETCH_CMD)

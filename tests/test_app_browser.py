@@ -121,9 +121,58 @@ def test_impact_mode_shows_drop_list_with_upstream(page):
     assert "drop these" in text, "the merged drop list is missing"
     assert "upstream" in text, "incremental ancestors should be tagged upstream"
     assert "int_11" in text and "int_24" in text, "incremental ancestors should be listed"
-    assert "drop table" in text and "cascade" in text, "each drop row carries DDL"
+    assert "drop table" in text, "each drop group carries DDL"
+    assert "cascade" not in text, "CASCADE was removed from the drop DDL"
     assert "rebuild normally" in text
     assert "dbt build --select" in text
+    # the drop list is grouped: AT MOST one heading per position (not a
+    # badge+statement per table), each group carrying a single DDL block
+    for pos in ("upstream", "target", "downstream"):
+        assert page.locator(f"#results .drop-ghead .pill.pos-{pos}").count() <= 1, \
+            f"at most one {pos} heading (grouped, not per-table)"
+    assert page.locator("#results .drop-ghead .pill.pos-upstream").count() == 1
+    assert page.locator("#results .drop-ghead .pill.pos-target").count() == 1
+    assert page.locator("#results .drop-group").count() == \
+        page.locator("#results .drop-group pre.cmd").count(), "one DDL block per group"
+    up_block = page.locator("#results .drop-group").filter(
+        has=page.locator(".pill.pos-upstream")).locator("pre.cmd").inner_text()
+    assert "int_11" in up_block and "int_24" in up_block, \
+        "both upstream incrementals share one DDL block"
+
+
+@needs(SYNTH_SMALL, GEN_SMALL_CMD)
+def test_detail_sections_collapse_independently(page):
+    """Each detail section (TARGET DETAIL / INSPECTING) folds on its own via its
+    header, hiding just that section's body."""
+    page.select_option("#modelPick", label="int_38")
+    page.wait_for_selector("#graph svg .node")
+    target, body = page.locator("#targetSec"), page.locator("#targetSec .det-body")
+    assert body.is_visible()
+    page.locator('.det-shead[data-sec="target"]').click()
+    page.wait_for_timeout(120)
+    assert "collapsed" in (target.get_attribute("class") or "")
+    assert body.is_hidden(), "TARGET DETAIL body hides when collapsed"
+    assert page.locator("#inspectSec .det-body").is_visible(), "collapse is per-section"
+    page.locator('.det-shead[data-sec="target"]').click()   # re-expand
+    page.wait_for_timeout(120)
+    assert body.is_visible()
+
+
+@needs(SYNTH_SMALL, GEN_SMALL_CMD)
+def test_column_picker_is_resizable_and_untruncated(page):
+    """The picker can be dragged to resize, and column names are laid out in
+    full (the box fits the widest name) rather than ellipsis-truncated."""
+    page.select_option("#modelPick", label="int_38")
+    page.locator('#modeSeg button[data-mode="columns"]').click()
+    page.wait_for_selector("#graph svg .node")
+    page.locator("#colBtn").click()
+    page.wait_for_selector("#colPop:not([hidden])")
+    assert page.locator("#colPop").evaluate("e => getComputedStyle(e).resize") == "both"
+    nm = page.locator("#colAvail .colpop-item .nm").first
+    assert nm.evaluate("e => getComputedStyle(e).textOverflow") != "ellipsis", \
+        "names must not ellipsis-truncate"
+    assert nm.evaluate("e => e.scrollWidth <= e.clientWidth + 1"), \
+        "the full name fits without clipping"
 
 
 @needs(SYNTH_SMALL, GEN_SMALL_CMD)

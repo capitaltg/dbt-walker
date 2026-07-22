@@ -107,11 +107,12 @@ def test_cli_against_jaffle_shop():
     result = json.loads(out.stdout)
     assert "model.jaffle_shop.orders" in result["full_refresh"]
     assert "model.jaffle_shop.customers" in result["rebuild"]
-    # the merged drop list carries a DROP ... CASCADE per incremental (design D3),
+    # the merged drop list carries a plain DROP per incremental (no CASCADE),
     # tagged by position, with the database qualifier stripped
     drop = {e["model"]: e for e in result["drop_list"]}
     assert set(drop) == set(result["full_refresh"])
     orders = drop["model.jaffle_shop.orders"]
     assert orders["position"] == "downstream"
-    assert orders["statement"].startswith("DROP TABLE ") and orders["statement"].endswith("CASCADE;")
+    assert orders["statement"].startswith("DROP TABLE ") and orders["statement"].endswith(";")
+    assert "CASCADE" not in orders["statement"]
     assert orders["relation"] == "main.orders"  # db-less schema.table

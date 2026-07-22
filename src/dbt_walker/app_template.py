@@ -101,24 +101,30 @@ select,input[type=search]{font:inherit;font-size:.85rem;background:var(--ground)
 .colbtn:disabled{color:var(--muted);cursor:default}
 .colbtn[aria-expanded=true]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
 .colpop[hidden]{display:none}
-.colpop{position:fixed;z-index:120;width:min(30rem,90vw);background:var(--panel);color:var(--ink);
-  border:1px solid var(--line);border-radius:9px;box-shadow:0 12px 34px rgba(0,0,0,.3);padding:.6rem .7rem}
+/* width fits the widest column name (max-content), capped to the graph pane by
+   JS; drag the bottom-right grip to resize both ways */
+.colpop{position:fixed;z-index:120;min-width:20rem;width:max-content;max-width:90vw;
+  height:26rem;max-height:80vh;
+  background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:9px;
+  box-shadow:0 12px 34px rgba(0,0,0,.3);padding:.6rem .7rem;
+  display:flex;flex-direction:column;resize:both;overflow:hidden}
 .colpop-head{display:flex;align-items:center;gap:.5rem;font-size:.9rem;margin-bottom:.4rem}
 .colpop-head #colPopModel{font-family:var(--mono);font-size:.78rem;color:var(--muted)}
 .colpop-head #colPopClose{margin-left:auto;border:0;background:none;color:var(--muted);
   font-size:1.2rem;line-height:1;cursor:pointer}
 #colPopFilter{width:100%;margin-bottom:.5rem}
-/* minmax(0,1fr) so a long, non-wrapping column name can't stretch a track wider
-   than half and overflow the popover -- names ellipsis-truncate instead */
-.colpop-panes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:.6rem}
-.colpop-pane{min-width:0}
+/* auto tracks so each pane sizes to its widest column name; the popover's
+   max-width (JS-clamped to the graph pane) makes overlong names scroll instead */
+.colpop-panes{display:grid;grid-template-columns:auto auto;gap:.6rem;flex:1 1 auto;min-height:0}
+.colpop-pane{min-width:0;display:flex;flex-direction:column;min-height:0}
 .colpop-label{font-family:var(--mono);font-size:.62rem;letter-spacing:.06em;text-transform:uppercase;
   color:var(--muted);margin-bottom:.25rem}
-.colpop-list{height:14rem;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:.2rem}
+.colpop-list{min-height:9rem;flex:1 1 auto;overflow:auto;border:1px solid var(--line);
+  border-radius:6px;padding:.2rem}
 .colpop-item{font-family:var(--mono);font-size:.85rem;padding:.2rem .4rem;border-radius:4px;cursor:pointer;
   display:flex;align-items:center;gap:.4rem}
 .colpop-item:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}
-.colpop-item .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.colpop-item .nm{flex:1;white-space:nowrap}   /* no truncation: the widest name sets the width */
 .colpop-item .mk{flex:none;color:var(--muted);font-size:.9rem}
 .colpop-item.unproven{color:var(--muted)}
 .colpop-empty{color:var(--muted);font-size:.78rem;padding:.5rem .4rem}
@@ -279,7 +285,12 @@ select,input[type=search]{font:inherit;font-size:.85rem;background:var(--ground)
 /* two themed sections: TARGET DETAIL (the plan, red) over INSPECTING (the SQL, blue) */
 .det-sec{border-left:3px solid transparent;padding:.1rem .1rem .1rem .55rem;margin-bottom:1rem}
 .det-shead{display:flex;align-items:center;gap:.45rem;font-family:var(--mono);font-size:.72rem;
-  letter-spacing:.06em;margin:.1rem 0 .5rem;color:var(--muted)}
+  letter-spacing:.06em;margin:.1rem 0 .5rem;color:var(--muted);cursor:pointer;user-select:none}
+.det-shead:hover{color:var(--ink)}
+.det-caret{color:var(--muted);font-size:.7em;flex:none;transition:transform .12s ease}
+.det-sec.collapsed .det-caret{transform:rotate(-90deg)}
+.det-sec.collapsed .det-shead{margin-bottom:.1rem}
+.det-sec.collapsed .det-body{display:none}
 .det-badge{font-size:.62rem;font-weight:700;padding:.1rem .5rem;border-radius:3px;letter-spacing:.04em}
 .det-shead #targetName,.det-shead #inspectName{font-family:var(--mono);font-size:.9em}
 .det-target{border-left-color:var(--changed)}
@@ -316,6 +327,11 @@ select,input[type=search]{font:inherit;font-size:.85rem;background:var(--ground)
 .pill.pos-upstream{background:color-mix(in srgb,#a78bfa 24%,transparent);color:#a78bfa}
 .pill.pos-target{background:color-mix(in srgb,var(--changed) 20%,transparent);color:var(--changed)}
 .pill.pos-downstream{background:color-mix(in srgb,var(--warn) 22%,transparent);color:var(--warn)}
+/* drop list grouped under ONE position heading, its DROP statements underneath */
+.drop-group{margin:.35rem 0 .7rem}
+.drop-ghead{display:flex;align-items:center;gap:.5rem;margin:.35rem 0 .15rem}
+.drop-ghead .pill{font-size:.68rem;padding:.14rem .55rem;text-transform:uppercase;letter-spacing:.05em}
+.drop-count{font-family:var(--mono);font-size:.72rem;color:var(--muted)}
 pre.cmd{font-family:var(--mono);font-size:.78rem;background:var(--ground);border:1px solid var(--line);
   border-radius:6px;padding:.4rem .5rem;overflow-x:auto;margin:.25rem 0;white-space:pre-wrap;
   overflow-wrap:break-word;word-break:normal}
@@ -530,13 +546,13 @@ ul.cols em{font-style:normal;color:var(--accent)}
     <div class="pane-head clickable" id="detailHead" title="Collapse detail panel"><h2>Detail</h2>
       <button class="collapse" id="hideDetail" title="Collapse" tabindex="-1">&#10095;</button></div>
     <div class="pane-body">
-      <section class="det-sec det-target">
-        <div class="det-shead"><span class="det-badge">TARGET DETAIL</span><span id="targetName"></span></div>
-        <div id="results"></div>
+      <section class="det-sec det-target" id="targetSec">
+        <div class="det-shead" data-sec="target" title="Click to collapse"><span class="det-caret">&#9662;</span><span class="det-badge">TARGET DETAIL</span><span id="targetName"></span></div>
+        <div class="det-body"><div id="results"></div></div>
       </section>
       <section class="det-sec det-inspect" id="inspectSec">
-        <div class="det-shead"><span class="det-badge">INSPECTING</span><span id="inspectName"></span></div>
-        <div id="sqlPanel"></div>
+        <div class="det-shead" data-sec="inspect" title="Click to collapse"><span class="det-caret">&#9662;</span><span class="det-badge">INSPECTING</span><span id="inspectName"></span></div>
+        <div class="det-body"><div id="sqlPanel"></div></div>
       </section>
     </div>
   </aside>
@@ -651,14 +667,14 @@ function upstreamIncrementals(root, cols){
 }
 function relSchemaTable(uid){ return (N[uid] && N[uid].rel_st) || N[uid].relation; }
 /* merge upstream + target + downstream incrementals into ONE topo-ordered drop
-   list, tagged by position, with db-less DROP DDL + the views a CASCADE removes */
+   list, tagged by position, with db-less DROP DDL (no CASCADE -- the database
+   qualifier is stripped since you're already connected) */
 function dropList(upstreamIncs, fullRefresh, root){
   const pos = {}; for (const u of upstreamIncs) pos[u] = "upstream";
   for (const u of fullRefresh) pos[u] = (u === root ? "target" : "downstream");
   return topoOrder(new Set(Object.keys(pos))).map(uid => ({
     model: uid, name: N[uid].name, position: pos[uid], relation: relSchemaTable(uid),
-    statement: "DROP TABLE " + relSchemaTable(uid) + " CASCADE;",
-    views: Object.keys(walk(uid,"down")).filter(d => N[d] && N[d].mat === "view").sort(),
+    statement: "DROP TABLE " + relSchemaTable(uid) + ";",
   }));
 }
 function colUpstream(uid, col, depth, seen, out){
@@ -871,6 +887,9 @@ function openColPopover(){
   colPopOpen = true; colFilter = "";
   const pop = $("colPop"); pop.hidden = false;
   $("colBtn").setAttribute("aria-expanded", "true");
+  // drop any prior manual resize so the box re-fits THIS model's column names
+  pop.style.width = ""; pop.style.height = "";
+  $("colPopFilter").value = ""; renderColPopover();   // fill first -> width fits content
   const r = $("colBtn").getBoundingClientRect();
   // keep the popover within the graph pane (not the whole viewport) so it never
   // spills over the detail pane on the right; cap its width to the pane too
@@ -880,7 +899,7 @@ function openColPopover(){
   pop.style.left = Math.round(Math.max(gp.left + 8,
     Math.min(r.left, gp.right - w - 12))) + "px";
   pop.style.top = (r.bottom + 6) + "px";
-  $("colPopFilter").value = ""; renderColPopover(); $("colPopFilter").focus();
+  $("colPopFilter").focus();
 }
 function closeColPopover(){
   colPopOpen = false; $("colPop").hidden = true;
@@ -1149,12 +1168,16 @@ function renderResults(res){
     if (!drop.length){
       h += '<div class="empty" style="padding:.2rem">Nothing to drop &mdash; nothing on this path is incremental.</div>';
     } else {
-      h += drop.map(e =>
-        '<div class="row" data-uid="' + e.model + '"><span class="pill pos-' + e.position + '">' +
-          e.position + '</span>' + esc(e.name) + "</div>" +
-        '<pre class="cmd">' + esc(e.statement) +
-        (e.views.length ? "\n-- CASCADE also drops views: " + e.views.map(v => N[v].name).join(", ") : "") +
-        "</pre>").join("");
+      // one colour-coded heading per position (upstream / target / downstream),
+      // with that group's DROP statements listed underneath as one copyable block
+      for (const pos of ["upstream","target","downstream"]){
+        const grp = drop.filter(e => e.position === pos);
+        if (!grp.length) continue;
+        h += '<div class="drop-group"><div class="drop-ghead"><span class="pill pos-' + pos +
+          '">' + pos + '</span><span class="drop-count">' + grp.length +
+          (grp.length === 1 ? " model" : " models") + '</span></div>' +
+          '<pre class="cmd">' + grp.map(e => esc(e.statement)).join("\n") + "</pre></div>";
+      }
     }
     if (res.absorbs.length){
       h += '<div class="section-label">Absorbs schema change (' + res.absorbs.length + ') <span class="info" ' +
@@ -1458,6 +1481,15 @@ $("treeHead").onclick = () => $("body").classList.toggle("no-tree");
 // the whole Detail header collapses the pane (the chevron just bubbles up to it)
 $("detailHead").onclick = () => { $("body").classList.add("no-detail"); $("showDetail").style.display = "flex"; };
 $("showDetail").onclick = () => { $("body").classList.remove("no-detail"); $("showDetail").style.display = "none"; };
+/* collapse either detail section (TARGET DETAIL / INSPECTING) independently */
+document.querySelectorAll(".det-shead[data-sec]").forEach(head => {
+  const sec = head.closest(".det-sec"), keyName = "dw-det-" + head.dataset.sec;
+  try { if (localStorage.getItem(keyName) === "1") sec.classList.add("collapsed"); } catch (_) {}
+  head.onclick = () => {
+    const c = sec.classList.toggle("collapsed");
+    try { localStorage.setItem(keyName, c ? "1" : "0"); } catch (_) {}
+  };
+});
 
 /* resizable panes: drag the edge between the graph and either side pane */
 function makeSplitter(id, side){

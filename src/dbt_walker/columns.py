@@ -584,16 +584,41 @@ def _resolve_column(scope, column) -> list[tuple[str, str]] | None:
     return out
 
 
+def _qualified_star_alias(scope) -> str | None:
+    """If the scope projects exactly one star and it is *qualified* (``t.*``),
+    return its table alias. A bare ``*``, no star, or several stars -> None."""
+    alias = None
+    stars = 0
+    for proj in scope.expression.selects:
+        inner = proj.this if isinstance(proj, exp.Alias) else proj
+        if _is_select_star(inner):
+            stars += 1
+            alias = inner.table if isinstance(inner, exp.Column) and inner.table else None
+    return alias if stars == 1 and alias else None
+
+
 def _resolve_through_star(scope, colname: str) -> list[tuple[str, str]] | None:
-    """Resolve a column reaching a `select *` scope: a star over one source
-    passes columns through by name; a star over a join is ambiguous (None)."""
-    from_sources = _from_sources(scope)
-    if len(from_sources) != 1:
+    """Resolve a column reaching a scope whose matching projection is a star.
+
+    A *qualified* star ``t.*`` provably projects only ``t``'s columns, so it
+    passes the column through ``t`` even when the scope joins other relations --
+    the ``select src.* ... left join ... qualify row_number()=1`` dedup pattern
+    is the common case, and treating it as ambiguous needlessly fails closed.
+    A *bare* ``*`` is only unambiguous over a single source (a star over a join
+    genuinely can't be attributed without a catalog)."""
+    star_alias = _qualified_star_alias(scope)
+    if star_alias is not None:
+        source = scope.sources.get(star_alias)
+    else:
+        from_sources = _from_sources(scope)
+        if len(from_sources) != 1:
+            return None
+        star_alias, source = next(iter(from_sources.items()))
+    if source is None:
         return None
-    alias, source = next(iter(from_sources.items()))
     if isinstance(source, exp.Table):
         return [(_relation_name(source), colname)]
-    return _resolve_column(scope, _synth_column(alias, colname))
+    return _resolve_column(scope, _synth_column(star_alias, colname))
 
 
 @dataclass

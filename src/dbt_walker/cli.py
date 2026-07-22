@@ -146,22 +146,20 @@ def _upstream_incrementals(graph: Graph, cg, root: str, columns) -> list[str]:
 
 def _drop_list(graph: Graph, upstream_incs, downstream_full_refresh, root: str):
     """Merge upstream + target + downstream incrementals into ONE topo-ordered
-    DROP list. Each row is tagged by position and carries db-less DROP DDL (you
-    are connected to the database) plus the views a CASCADE would take out."""
+    DROP list. Each row is tagged by position and carries db-less DROP DDL (the
+    database qualifier is stripped since you are already connected)."""
     position: dict[str, str] = {u: "upstream" for u in upstream_incs}
     for u in downstream_full_refresh:
         position[u] = "target" if u == root else "downstream"
     entries = []
     for uid in graph.topo_order(set(position)):
         rel = graph.relation_schema_table(uid)
-        victims = [d for d in graph.walk(uid, "down") if graph.materialization(d) == "view"]
         entries.append({
             "model": uid,
             "name": graph.label(uid),
             "position": position[uid],
             "relation": rel,
-            "statement": f"DROP TABLE {rel} CASCADE;",
-            "cascade_drops_views": sorted(victims),
+            "statement": f"DROP TABLE {rel};",
         })
     return entries
 
@@ -186,9 +184,6 @@ def _render_impact(graph: Graph, root: str, columns, drop, absorbs, rebuild,
         print("whose history you don't trust:")
         for i, e in enumerate(drop, 1):
             print(f"  {i}. {e['name']:<26} {e['position']:<10} {e['statement']}")
-            if e["cascade_drops_views"]:
-                views = ", ".join(graph.label(v) for v in e["cascade_drops_views"])
-                print(f"       -- CASCADE also drops views: {views}")
         print()
     if absorbs:
         print(f"ABSORBS SCHEMA CHANGE ({len(absorbs)}) - the next normal run adds the column;")

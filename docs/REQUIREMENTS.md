@@ -11,7 +11,7 @@ implemented today.
 > column is threaded through the staging/intermediate layers into a mart. It now
 > emits ONE topologically-ordered **drop list** of every incremental on the
 > change's lineage (upstream ∪ target ∪ downstream), column-pruned, with db-less
-> `DROP ... CASCADE` DDL. `--additive` moves absorb-capable incrementals into a
+> `DROP TABLE` DDL. `--additive` moves absorb-capable incrementals into a
 > separate bucket rather than silently reclassifying them. The visual explorer
 > (`build-app`, §3.4), `catalog.json` support, structural passthrough, and
 > external-terminal reporting (§3.5) are also shipped. The old per-model
@@ -85,18 +85,21 @@ topological order, each tagged by position:
 - **target** — the changed model itself, if incremental.
 - **downstream** — an incremental descendant that reads the change.
 
-Each row carries an explicit `DROP TABLE <schema.alias> CASCADE;` — **db-less**
-(no database qualifier: you're connected to the database, and Redshift/Postgres
-have no cross-database DDL) — annotated with the downstream **view** models the
-`CASCADE` would also remove. A dropped incremental is rebuilt in full by the
-next scheduled `dbt run`. Neutral framing: *drop the ones you changed, or whose
-stored history you don't trust* — the tool does not try to infer which models
-were edited.
+Each row carries an explicit `DROP TABLE <schema.alias>;` — **db-less** (no
+database qualifier: you're connected to the database, and Redshift/Postgres have
+no cross-database DDL) and **without `CASCADE`** (removed 0.4.1: a plain drop is
+the safer default, and the drop list already names every affected model
+explicitly). A dropped incremental is rebuilt in full by the next scheduled
+`dbt run`. Neutral framing: *drop the ones you changed, or whose stored history
+you don't trust* — the tool does not try to infer which models were edited. In
+the app the drop list is grouped under one heading per position
+(upstream/target/downstream), each group's `DROP` statements listed together.
 
 Alongside the drop list: models that **rebuild for free** (views/tables), the
 downstream tests that re-run, affected exposures/snapshots, and the safe dbt
 alternative (`dbt run --select <drop-list> --full-refresh` +
-`dbt build --select <changed>+`) — both refresh paths always shown (decision D3).
+`dbt build --select <changed>+`) — both refresh paths always shown (decision D3,
+revised 0.4.1: the DDL path is a plain `DROP TABLE`, no longer `... CASCADE`).
 
 `--column C` prunes the WHOLE list — upstream and downstream — to the lineage of
 column `C` (fails closed, §3.2). `--additive`: see §2.5.
@@ -122,7 +125,7 @@ were edited). Renames/drops/type changes are never additive.
   `rebuild`, `upstream_prerequisites`, `full_refresh`, `tests`, `exposures`,
   `snapshots` (and, with `--column`, `columns` and `unknown_models`).
   `drop_list` is a list of
-  `{model, name, position, relation, statement, cascade_drops_views}` in
+  `{model, name, position, relation, statement}` in
   topological order, `position` ∈ {upstream, target, downstream}, `relation`
   db-less. `upstream_prerequisites` and `full_refresh` are back-compat views of
   the drop list (the `upstream` rows, and the `target`+`downstream` rows,
