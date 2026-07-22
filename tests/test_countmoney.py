@@ -35,12 +35,15 @@ def test_impact_json_has_all_contract_keys():
     with redirect_stdout(buf):
         cli.cmd_impact(args)
     result = json.loads(buf.getvalue())
-    for key in ("changed", "full_refresh", "rebuild", "snapshots", "tests", "exposures", "ddl"):
+    for key in ("changed", "drop_list", "absorbs", "full_refresh", "rebuild",
+                "upstream_prerequisites", "snapshots", "tests", "exposures"):
         assert key in result, f"impact --json missing contract key {key!r}"
-    # ddl entries, if any, are well-formed
-    for entry in result["ddl"]:
+    # drop-list entries, if any, are well-formed and position-tagged
+    for entry in result["drop_list"]:
         assert entry["statement"].startswith("DROP TABLE ")
-        assert set(entry) == {"statement", "relation", "model", "cascade_drops_views"}
+        assert entry["position"] in ("upstream", "target", "downstream")
+        assert set(entry) == {"model", "name", "position", "relation",
+                              "statement", "cascade_drops_views"}
 
 
 @needs(COUNTMONEY, FETCH_CMD)

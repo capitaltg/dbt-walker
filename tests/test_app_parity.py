@@ -79,17 +79,20 @@ def _python_expected(graph, cases, carried):
             merged_unknown |= t.unknown_models
         # the changed model itself is part of the refresh plan
         plan_models = sorted(merged_affected | {uid})
-        full, rebuild = cli._classify_models(graph, plan_models, additive=False)
-        full_add, rebuild_add = cli._classify_models(graph, plan_models, additive=True)
+        full, absorbs, rebuild = cli._classify_downstream(graph, plan_models, additive=False)
+        full_a, absorbs_a, rebuild_a = cli._classify_downstream(graph, plan_models, additive=True)
+        up_incs = cli._upstream_incrementals(graph, cg, uid, cols)
+        drop = [[e["model"], e["position"]] for e in cli._drop_list(graph, up_incs, full, uid)]
         out.append({
             "model": uid, "cols": cols,
             "affected": sorted(merged_affected),
             "unknown": sorted(merged_unknown),
-            "full": full, "rebuild": rebuild,
-            "full_additive": full_add, "rebuild_additive": rebuild_add,
+            "full": full, "absorbs": absorbs, "rebuild": rebuild,
+            "full_additive": full_a, "absorbs_additive": absorbs_a, "rebuild_additive": rebuild_a,
             "up": sorted(u for u in graph.walk(uid, "up") if u in carried),
             "down": sorted(u for u in graph.walk(uid, "down") if u in carried),
-            "prereqs": cli._upstream_prereqs(graph, uid),
+            "up_incrementals": up_incs,
+            "drop": drop,
         })
     return out
 
@@ -109,16 +112,19 @@ const out = CASES.map(([model, cols]) => {
   const planSet = new Set(affected);
   if (N[model] && N[model].type === "model") planSet.add(model);
   const plan = Array.from(planSet);
-  const a = classify(plan, false), b = classify(plan, true);
+  const a = classifyDownstream(plan, false), b = classifyDownstream(plan, true);
+  const upIncs = upstreamIncrementals(model, cols);
+  const drop = dropList(upIncs, a.full, model).map(e => [e.model, e.position]);
   return {
     model, cols,
     affected: Array.from(affected).sort(),
     unknown: Array.from(unknown).sort(),
-    full: a.full, rebuild: a.rebuild,
-    full_additive: b.full, rebuild_additive: b.rebuild,
+    full: a.full, absorbs: a.absorbs, rebuild: a.rebuild,
+    full_additive: b.full, absorbs_additive: b.absorbs, rebuild_additive: b.rebuild,
     up: Object.keys(walk(model, "up")).sort(),
     down: Object.keys(walk(model, "down")).sort(),
-    prereqs: upstreamPrereqs(model),
+    up_incrementals: upIncs,
+    drop,
   };
 });
 process.stdout.write(JSON.stringify(out));
@@ -152,8 +158,9 @@ def test_js_traversal_matches_python(tmp_path):
     assert len(actual) == len(expected)
     for exp, act in zip(expected, actual):
         label = f"{exp['model']} cols={exp['cols']}"
-        for field in ("affected", "unknown", "full", "rebuild",
-                      "full_additive", "rebuild_additive", "up", "down", "prereqs"):
+        for field in ("affected", "unknown", "full", "absorbs", "rebuild",
+                      "full_additive", "absorbs_additive", "rebuild_additive",
+                      "up", "down", "up_incrementals", "drop"):
             assert act[field] == exp[field], (
                 f"{label}: JS {field} != Python\n  JS:     {act[field]}\n  Python: {exp[field]}"
             )
@@ -265,11 +272,12 @@ def test_js_taint_is_per_column(tmp_path):
 _UNPROVEN_HARNESS = """
 const DATA = {nodes:{}, parents:{}, children:{}, sql:{}, columns:{
   mixed:  {resolved:true, cols:{
-             good: [["m.up","a","passthrough"]],
-             bad:  [[null,"","unknown"]],
-             both: [["m.up","b","case"],[null,"","unknown"]]}},
+             good: [["m.up","a","passthrough",null]],
+             bad:  [[null,null,"unknown",null]],
+             both: [["m.up","b","case",null],[null,null,"unknown",null]],
+             ext:  [[null,"amount","passthrough","otherdb.x.raw"]]}},   // external: PROVEN
   broken: {resolved:false, cols:{x:[], y:[]}},
-  clean:  {resolved:true, cols:{a:[["m.up","a","passthrough"]]}}
+  clean:  {resolved:true, cols:{a:[["m.up","a","passthrough",null]]}}
 }};
 __TRAVERSAL__
 const s = u => Array.from(unprovenCols(u)).sort();
@@ -282,14 +290,65 @@ process.stdout.write(JSON.stringify({
 @needs_node
 def test_js_marks_untraceable_columns(tmp_path):
     """Fail-closed inclusions must be distinguishable from proven derivations --
-    otherwise "we couldn't tell" is presented as a finding."""
+    otherwise "we couldn't tell" is presented as a finding. An EXTERNAL terminal
+    (off-project relation) is proven, not unproven."""
     script = tmp_path / "unproven.js"
     script.write_text(_UNPROVEN_HARNESS.replace("__TRAVERSAL__", _traversal_js()), encoding="utf-8")
     proc = subprocess.run([NODE, str(script)], capture_output=True, text=True)
     assert proc.returncode == 0, f"node failed:\n{proc.stderr}"
     got = json.loads(proc.stdout)
 
-    assert got["mixed"] == ["bad", "both"], "a null parent anywhere makes the column unproven"
+    assert got["mixed"] == ["bad", "both"], "only genuine-unknown columns are unproven; external is proven"
     assert got["broken"] == ["x", "y"], "an unparseable model taints all of its columns"
     assert got["clean"] == [], "fully traced model has nothing unproven"
     assert got["missing"] == [], "unknown node id must not throw"
+
+
+_PASSTHROUGH_HARNESS = """
+const DATA = {nodes:{
+    "raw": {name:"raw", type:"source"},
+    "src": {name:"src", type:"model", mat:"table"},
+    "stg": {name:"stg", type:"model", mat:"incremental", relation:"db.s.stg", rel_st:"s.stg"},
+    "mart":{name:"mart",type:"model", mat:"table"}
+  }, parents:{raw:[], src:["raw"], stg:["src"], mart:["stg"]},
+     children:{raw:["src"], src:["stg"], stg:["mart"], mart:[]}, sql:{}, columns:{
+    "src": {resolved:true, cols:{x:[["raw","x","passthrough",null]], y:[]}},       // src reads a SOURCE
+    "stg": {resolved:true, cols:{}, passthrough:{parent:"src", rel:"db.s.src"}},   // select * from src
+    "mart":{resolved:true, cols:{c:[["stg","x","passthrough",null]]}}             // reads stg.x
+  }};
+__TRAVERSAL__
+// tracing mart.c up passes through stg's `select *` to src.x, then to the SOURCE raw
+// (a leaf) -- and STOPS there cleanly, no trailing "unknown"
+const up = colUpstream("mart","c").map(e => [e.uid, e.col, e.parent, e.pcol, e.rel, e.t]);
+// changing src.x taints stg.x (passthrough) and mart.c
+const t = taint("src", ["x"]);
+process.stdout.write(JSON.stringify({
+  up,
+  taintAffected: Array.from(t.affected).sort(),
+  // changing src.y (a column stg passes through but mart doesn't read) taints stg.y only
+  yAffected: Array.from(taint("src",["y"]).affected).sort()
+}));
+"""
+
+
+@needs_node
+def test_js_passthrough_and_external(tmp_path):
+    """The JS mirrors structural passthrough (a `select *` model resolves columns
+    by name through its terminal) and external terminals (off-project relations)."""
+    script = tmp_path / "passthrough.js"
+    script.write_text(_PASSTHROUGH_HARNESS.replace("__TRAVERSAL__", _traversal_js()), encoding="utf-8")
+    proc = subprocess.run([NODE, str(script)], capture_output=True, text=True)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr}"
+    got = json.loads(proc.stdout)
+
+    # mart.c -> stg.c (passthrough) -> src.x -> source raw.x, terminating cleanly
+    # at the source leaf (no spurious "unknown" edge after it)
+    assert got["up"] == [
+        ["mart", "c", "stg", "x", None, "passthrough"],
+        ["stg", "x", "src", "x", None, "passthrough"],
+        ["src", "x", "raw", "x", None, "passthrough"],
+    ]
+    # src.x change flows through the passthrough stg into mart
+    assert got["taintAffected"] == ["mart", "stg"]
+    # src.y passes through stg but mart doesn't read it -> only stg affected
+    assert got["yAffected"] == ["stg"]

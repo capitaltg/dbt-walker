@@ -585,6 +585,277 @@ def test_taint_does_not_over_mark_independent_columns():
     assert "model.p.b" in taint.affected
 
 
+# ------------------------------------------- external terminals & relation mapping
+
+def _cg_from(nodes, adapter="duckdb", parent_map=None, child_map=None, tmp=None):
+    from pathlib import Path
+    manifest = {"metadata": {"adapter_type": adapter}, "nodes": nodes, "sources": {},
+                "parent_map": parent_map or {u: [] for u in nodes},
+                "child_map": child_map or {}}
+    g = Graph(manifest, project_root=tmp or Path("."))
+    return g, ColumnGraph(g, dialect=adapter)
+
+
+def _model(name, sql, db="db", sch="s"):
+    return {"resource_type": "model", "name": name, "database": db, "schema": sch,
+            "alias": name, "compiled_code": sql}
+
+
+def test_external_relation_resolves_not_unknown():
+    """A column qualified to a relation that isn't a dbt node is EXTERNAL, not
+    unknown: we know where it comes from, it's just off-project."""
+    _, cg = _cg_from({"model.p.m": _model("m", "select e.amount as amount from otherdb.ext.raw e")})
+    e = cg.columns_of("model.p.m").columns["amount"][0]
+    assert e.parent is None and e.is_external and not e.is_unknown
+    assert e.parent_rel == "otherdb.ext.raw" and e.column == "amount"
+    assert e.transform == "passthrough"  # a real transform, never "unknown"
+
+
+def test_external_terminal_does_not_taint_but_unknown_does():
+    """The fail-closed line: a genuinely unknown leaf taints downstream; a KNOWN
+    external leaf does not (an off-project source can't carry an in-project change)."""
+    from pathlib import Path
+    nodes = {"model.p.a": {"name": "a", "resource_type": "model", "config": {}},
+             "model.p.b": {"name": "b", "resource_type": "model", "config": {}}}
+    g = Graph({"nodes": nodes, "parent_map": {"model.p.a": [], "model.p.b": ["model.p.a"]},
+               "child_map": {"model.p.a": ["model.p.b"], "model.p.b": []}}, project_root=Path("."))
+    cg = ColumnGraph(g, dialect=DUCK)
+    edge = colmod.ColumnEdge
+    cg._cache["model.p.a"] = colmod.ModelColumns(True, {"x": []})
+
+    cg._cache["model.p.b"] = colmod.ModelColumns(True, {
+        "ext": [edge(None, "amount", "passthrough", parent_rel="otherdb.ext.raw")]})
+    assert "model.p.b" not in cg.taint_downstream("model.p.a", "x").affected
+
+    cg._cache["model.p.b"] = colmod.ModelColumns(True, {"u": [edge(None, None, "unknown")]})
+    assert "model.p.b" in cg.taint_downstream("model.p.a", "x").affected
+
+
+def test_relation_mapping_normalizes_quotes_and_case():
+    """A node aliased SRC in DB.S maps a `"db"."s"."src"` FROM back to it —
+    matching is quote- and case-insensitive on both sides."""
+    nodes = {
+        "model.p.src": {"resource_type": "model", "name": "src", "database": "DB",
+                        "schema": "S", "alias": "SRC", "compiled_code": "select 1"},
+        "model.p.m": _model("m", 'select s.v as v from "db"."s"."src" s', db="DB", sch="S"),
+    }
+    _, cg = _cg_from(nodes, adapter="postgres",
+                     parent_map={"model.p.src": [], "model.p.m": ["model.p.src"]})
+    e = cg.columns_of("model.p.m").columns["v"][0]
+    assert e.parent == "model.p.src" and e.column == "v"
+
+
+def test_relation_collision_fails_closed_as_unknown():
+    """Two models clobbering one relation is ambiguous -> the reference is UNKNOWN
+    (fail closed), never external and never a guessed node."""
+    nodes = {
+        "model.p.a": {"resource_type": "model", "name": "a", "database": "db",
+                      "schema": "s", "alias": "dup", "compiled_code": "select 1"},
+        "model.p.b": {"resource_type": "model", "name": "b", "database": "db",
+                      "schema": "s", "alias": "dup", "compiled_code": "select 1"},
+        "model.p.m": _model("m", "select d.v as v from db.s.dup d"),
+    }
+    _, cg = _cg_from(nodes)
+    assert "db.s.dup" in cg._collision_rels
+    e = cg.columns_of("model.p.m").columns["v"][0]
+    assert e.is_unknown and e.transform == "unknown"
+
+
+def test_upstream_trace_carries_external_relation():
+    """The col-upstream trace records the external relation so the CLI/app can
+    show `otherdb.ext.raw.amount [external]` instead of 'lineage unknown'."""
+    _, cg = _cg_from({"model.p.m": _model("m", "select e.amount as amount from otherdb.ext.raw e")})
+    e = cg.upstream("model.p.m", "amount").edges[0]
+    assert e["parent"] is None and e["parent_relation"] == "otherdb.ext.raw"
+    assert e["parent_column"] == "amount" and e["transform"] != "unknown"
+
+
+# ------------------------------------------- structural passthrough (select *)
+
+def test_passthrough_analyze_finds_terminal_and_computed():
+    from dbt_walker.columns import passthrough_analyze
+    # a plain `select *` over one table -> terminal, no computed additions
+    assert passthrough_analyze("select * from db.sch.src", DUCK) == ("db.sch.src", {})
+    assert passthrough_analyze("select * from db.sch.src where x=1", DUCK) == ("db.sch.src", {})
+    # the dbt dedup/latest pattern: a `select *, row_number()...` chain resolves
+    # to the bottom relation, and the row_number resolves to its partition inputs
+    dedup = ("with imp as (select * from db.sch.src), "
+             "dd as (select * from (select *, row_number() over "
+             "(partition by k order by d desc) as rn from imp) t where t.rn=1) "
+             "select * from dd")
+    terminal, computed = passthrough_analyze(dedup, DUCK)
+    assert terminal == "db.sch.src"
+    assert set(computed) == {"rn"}
+    assert {(r, c) for r, c, _ in computed["rn"]} == {("db.sch.src", "k"), ("db.sch.src", "d")}
+    # a star over a join is ambiguous; a bare-column rename alongside a star isn't
+    # a clean passthrough -> both fail closed
+    assert passthrough_analyze("select * from db.sch.a join db.sch.b on a.id=b.id", DUCK) is None
+    assert passthrough_analyze("select *, id as also_id from db.sch.src", DUCK) is None
+
+
+def test_passthrough_model_resolves_column_by_name():
+    """`select * from source` isn't unknown: a named column traces to source.col
+    without needing the source's full inventory (Huey's real-world dead-end)."""
+    nodes = {
+        "model.p.src": {"resource_type": "model", "name": "src", "database": "db",
+                        "schema": "s", "alias": "src", "compiled_code": "select 1"},
+        "model.p.stg": _model("stg", "select * from db.s.src"),
+    }
+    _, cg = _cg_from(nodes, parent_map={"model.p.src": [], "model.p.stg": ["model.p.src"]})
+    mc = cg.columns_of("model.p.stg")
+    assert mc.resolved and mc.passthrough == "db.s.src" and mc.columns == {}
+    # any column resolves through the star, by name, to the source node
+    e = cg.upstream("model.p.stg", "anything").edges[0]
+    assert e["parent"] == "model.p.src" and e["parent_column"] == "anything"
+    assert e["transform"] == "passthrough"
+
+
+def test_passthrough_dedup_chain_resolves_real_and_computed_columns():
+    """The canonical dbt latest-record pattern: a real column passes through to
+    the source; the row_number artifact keeps its own (partition) lineage."""
+    nodes = {
+        "model.p.src": {"resource_type": "model", "name": "src", "database": "db",
+                        "schema": "s", "alias": "src", "compiled_code": "select 1"},
+        "model.p.latest": _model("latest",
+            "with imp as (select * from db.s.src), "
+            "dd as (select * from (select *, row_number() over "
+            "(partition by k order by d desc) as rn from imp) t where t.rn=1) "
+            "select * from dd"),
+    }
+    _, cg = _cg_from(nodes, parent_map={"model.p.src": [], "model.p.latest": ["model.p.src"]})
+    mc = cg.columns_of("model.p.latest")
+    assert mc.resolved and mc.passthrough == "db.s.src"
+    # a real business column passes through by name
+    assert cg.upstream("model.p.latest", "lt_borr").edges[0]["parent"] == "model.p.src"
+    # the row_number keeps its real inputs (never fails open to src.rn)
+    rn_parents = {(e["parent"], e["parent_column"]) for e in cg.upstream("model.p.latest", "rn").edges}
+    assert ("model.p.src", "k") in rn_parents and ("model.p.src", "d") in rn_parents
+
+
+def test_passthrough_taint_inherits_source_columns_by_name():
+    """Changing source.col taints the passthrough staging model's col (and only
+    that col), then flows on downstream."""
+    from pathlib import Path
+    nodes = {
+        "model.p.src": _model("src", "select a.x as x, a.y as y from db.s.raw a"),
+        "model.p.stg": _model("stg", "select * from db.s.src"),
+    }
+    g = Graph({"metadata": {"adapter_type": DUCK}, "nodes": nodes, "sources": {},
+               "parent_map": {"model.p.src": [], "model.p.stg": ["model.p.src"]},
+               "child_map": {"model.p.src": ["model.p.stg"], "model.p.stg": []}},
+              project_root=Path("."))
+    cg = ColumnGraph(g, dialect=DUCK)
+    taint = cg.taint_downstream("model.p.src", "x")
+    assert ("model.p.stg", "x") in taint.tainted
+    assert ("model.p.stg", "y") not in taint.tainted  # only the changed column
+    assert "model.p.stg" in taint.affected
+
+
+def test_passthrough_over_external_source_is_terminal_not_tainting():
+    """A passthrough over an off-project relation has no in-project source to
+    inherit taint from — it stays a resolved external terminal upstream."""
+    _, cg = _cg_from({"model.p.stg": _model("stg", "select * from otherdb.ext.raw")})
+    mc = cg.columns_of("model.p.stg")
+    assert mc.resolved and mc.passthrough == "otherdb.ext.raw"
+    e = cg.upstream("model.p.stg", "col").edges[0]
+    assert e["parent"] is None and e["parent_relation"] == "otherdb.ext.raw"
+
+
+# --------------------------------------------------- impact drop-list engine (Stage 2)
+
+def _inc(name, sql, osc="ignore"):
+    return {"resource_type": "model", "name": name, "database": "db", "schema": "s",
+            "alias": name, "config": {"materialized": "incremental", "on_schema_change": osc},
+            "compiled_code": sql}
+
+
+def test_upstream_drop_list_is_column_pruned():
+    """The core of the redesign: only incremental ancestors on the CHANGED
+    column's lineage go in the drop list; an ancestor feeding a different column
+    is pruned out. With no column, every incremental ancestor is listed."""
+    from pathlib import Path
+    from dbt_walker import cli
+    nodes = {
+        "model.p.stg_a": _inc("stg_a", "select r.x as x from db.s.raw r"),
+        "model.p.stg_b": _inc("stg_b", "select r.z as z from db.s.raw r"),
+        "model.p.mart": {"resource_type": "model", "name": "mart", "database": "db",
+                         "schema": "s", "alias": "mart", "config": {"materialized": "table"},
+                         "compiled_code": "select a.x as c, b.z as d from db.s.stg_a a "
+                                          "join db.s.stg_b b on a.x = b.z"},
+    }
+    g = Graph({"metadata": {"adapter_type": DUCK}, "nodes": nodes, "sources": {},
+               "parent_map": {"model.p.stg_a": [], "model.p.stg_b": [],
+                              "model.p.mart": ["model.p.stg_a", "model.p.stg_b"]},
+               "child_map": {"model.p.stg_a": ["model.p.mart"],
+                             "model.p.stg_b": ["model.p.mart"], "model.p.mart": []}},
+              project_root=Path("."))
+    cg = ColumnGraph(g, dialect=DUCK)
+    # model-level: both incremental ancestors
+    assert set(cli._upstream_incrementals(g, None, "model.p.mart", None)) == \
+        {"model.p.stg_a", "model.p.stg_b"}
+    # column c flows only from stg_a -> stg_b is pruned out
+    assert cli._upstream_incrementals(g, cg, "model.p.mart", ["c"]) == ["model.p.stg_a"]
+
+
+def test_upstream_fails_closed_on_opaque_ancestor():
+    """If a column's lineage dead-ends at an opaque incremental, we can't prune
+    above it -> every incremental ancestor is kept (fail closed)."""
+    from pathlib import Path
+    from dbt_walker import cli
+    nodes = {
+        "model.p.a": {"name": "a", "resource_type": "model", "config": {"materialized": "incremental"}},
+        "model.p.b": {"name": "b", "resource_type": "model", "config": {"materialized": "incremental"}},
+        "model.p.mart": {"name": "mart", "resource_type": "model", "config": {"materialized": "table"}},
+    }
+    g = Graph({"nodes": nodes,
+               "parent_map": {"model.p.a": [], "model.p.b": ["model.p.a"],
+                              "model.p.mart": ["model.p.b"]},
+               "child_map": {"model.p.a": ["model.p.b"], "model.p.b": ["model.p.mart"],
+                             "model.p.mart": []}}, project_root=Path("."))
+    cg = ColumnGraph(g, dialect=DUCK)
+    cg._cache["model.p.mart"] = colmod.ModelColumns(True, {"c": [colmod.ColumnEdge("model.p.b", "c", "passthrough")]})
+    cg._cache["model.p.b"] = colmod.ModelColumns(False)  # opaque
+    # can't trace past b -> both b and its ancestor a are kept
+    assert set(cli._upstream_incrementals(g, cg, "model.p.mart", ["c"])) == {"model.p.a", "model.p.b"}
+
+
+def test_classify_downstream_absorbs_bucket():
+    from pathlib import Path
+    from dbt_walker import cli
+    nodes = {
+        "model.p.app": {"name": "app", "resource_type": "model",
+                        "config": {"materialized": "incremental", "on_schema_change": "append_new_columns"}},
+        "model.p.ign": {"name": "ign", "resource_type": "model",
+                        "config": {"materialized": "incremental", "on_schema_change": "ignore"}},
+        "model.p.tbl": {"name": "tbl", "resource_type": "model", "config": {"materialized": "table"}},
+    }
+    g = Graph({"nodes": nodes, "parent_map": {u: [] for u in nodes}, "child_map": {}},
+              project_root=Path("."))
+    models = list(nodes)
+    fr, ab, rb = cli._classify_downstream(g, models, additive=False)
+    assert set(fr) == {"model.p.app", "model.p.ign"} and ab == [] and rb == ["model.p.tbl"]
+    # under --additive, the append_new_columns incremental absorbs -> its own bucket
+    fr, ab, rb = cli._classify_downstream(g, models, additive=True)
+    assert set(fr) == {"model.p.ign"} and ab == ["model.p.app"] and rb == ["model.p.tbl"]
+
+
+def test_drop_list_positions_and_db_less_ddl():
+    from pathlib import Path
+    from dbt_walker import cli
+    nodes = {u: {"name": u, "resource_type": "model", "database": "warehouse",
+                 "schema": "analytics", "alias": u, "config": {"materialized": "incremental"}}
+             for u in ("up", "tgt", "down")}
+    g = Graph({"nodes": nodes,
+               "parent_map": {"up": [], "tgt": ["up"], "down": ["tgt"]},
+               "child_map": {"up": ["tgt"], "tgt": ["down"], "down": []}}, project_root=Path("."))
+    drop = cli._drop_list(g, ["up"], ["tgt", "down"], root="tgt")
+    assert [(e["model"], e["position"]) for e in drop] == \
+        [("up", "upstream"), ("tgt", "target"), ("down", "downstream")]  # topo order
+    for e in drop:
+        assert e["relation"].startswith("analytics.") and "warehouse" not in e["relation"]
+        assert e["statement"] == f"DROP TABLE analytics.{e['model']} CASCADE;"
+
+
 def test_missing_sqlglot_gives_install_hint(monkeypatch):
     from pathlib import Path
 

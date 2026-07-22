@@ -1,9 +1,21 @@
 # dbt-walker — Requirements, Assumptions & Expectations
 
 Spec of record for dbt-walker. Reflects decisions made with the maintainer
-(a data engineer running dbt on Redshift/Postgres) on 2026-07-19. This document
-governs the whole roadmap; sections marked **(shipped)** are implemented today,
-**(planned)** are specified but not yet built.
+(a data engineer running dbt on Redshift/Postgres), initial spec 2026-07-19,
+**substantially revised 2026-07-21** for the drop-list redesign (0.4.0). This
+document governs the whole roadmap; sections marked **(shipped)** are
+implemented today.
+
+> **0.4.0 redesign (2026-07-21).** `impact` was reframed around the maintainer's
+> actual workflow — *"the work is done, which models do I drop now?"* — after a
+> column is threaded through the staging/intermediate layers into a mart. It now
+> emits ONE topologically-ordered **drop list** of every incremental on the
+> change's lineage (upstream ∪ target ∪ downstream), column-pruned, with db-less
+> `DROP ... CASCADE` DDL. `--additive` moves absorb-capable incrementals into a
+> separate bucket rather than silently reclassifying them. The visual explorer
+> (`build-app`, §3.4), `catalog.json` support, structural passthrough, and
+> external-terminal reporting (§3.5) are also shipped. The old per-model
+> full_refresh/rebuild framing (below where noted) is superseded.
 
 ---
 
@@ -14,12 +26,15 @@ model or column, what you need to know to refresh safely:
 
 - what a model reads from (upstream lineage),
 - what reads from it (downstream lineage),
-- which downstream incrementals must be dropped / `--full-refresh` versus which
-  just rebuild, plus the tests, snapshots, and exposures in the blast radius.
+- **which incrementals to drop** — upstream, target, and downstream — before the
+  change resolves cleanly, versus which just rebuild for free, plus the tests,
+  snapshots, and exposures in the blast radius (the drop list, §2.3),
+- and all of the above **pruned to a single column's lineage** (§3.1–3.2).
 
-It **plans** refreshes; dbt **executes** them. It reads dbt's compiled artifacts
-(`target/manifest.json`, later `target/compiled/` and `target/catalog.json`) and
-**never connects to a warehouse**.
+Two front-ends: a **CLI** (text-first, `--json` scriptable) and a **one-file
+offline visual explorer** (`build-app`, §3.4). It **plans** refreshes; dbt
+**executes** them. It reads dbt's compiled artifacts (`target/manifest.json`,
+`target/compiled/`, `target/catalog.json`) and **never connects to a warehouse**.
 
 Output priorities: **human-readable text first**; `--json` is a stable,
 scriptable contract (see §2.4).
@@ -54,55 +69,65 @@ dbt-walker downstream <model> [--depth N] [--mat M ...] [--tests] [--json]
 - Text output: an indented tree annotated with each node's materialization
   (and `on_schema_change` for incrementals).
 
-### 2.3 `impact`
+### 2.3 `impact` (drop-list model, 0.4.0)
 
 ```
-dbt-walker impact <model> [--additive] [--json]
+dbt-walker impact <model> [--column C [--dialect D]] [--additive] [--json]
 ```
 
-The refresh-planning command. It classifies every downstream **model** into:
+The refresh-planning command. It answers *"which models do I drop now?"* with
+one **DROP THESE** list: every **incremental** on the change's lineage, in
+topological order, each tagged by position:
 
-- **full_refresh** — incremental models that must be dropped and rebuilt.
-- **rebuild** — everything else (a normal `dbt run`/`build` suffices).
+- **upstream** — an incremental ancestor the change flows down from. (In the
+  maintainer's workflow the developer has already threaded the new column
+  through these, so they hold old-logic history and must be rebuilt.)
+- **target** — the changed model itself, if incremental.
+- **downstream** — an incremental descendant that reads the change.
 
-Classification rule (frozen): an incremental model needs a full refresh unless
-`--additive` is set **and** its `on_schema_change` is `append_new_columns` or
-`sync_all_columns` (those absorb *additive* column changes in place). Renames,
-drops, and type changes are never additive and always force a full refresh.
-Non-incremental models are always just `rebuild`.
+Each row carries an explicit `DROP TABLE <schema.alias> CASCADE;` — **db-less**
+(no database qualifier: you're connected to the database, and Redshift/Postgres
+have no cross-database DDL) — annotated with the downstream **view** models the
+`CASCADE` would also remove. A dropped incremental is rebuilt in full by the
+next scheduled `dbt run`. Neutral framing: *drop the ones you changed, or whose
+stored history you don't trust* — the tool does not try to infer which models
+were edited.
 
-It also reports downstream snapshots (whose check/timestamp logic can capture
-bogus diffs after a schema change), counts downstream tests, and lists affected
-exposures.
+Alongside the drop list: models that **rebuild for free** (views/tables), the
+downstream tests that re-run, affected exposures/snapshots, and the safe dbt
+alternative (`dbt run --select <drop-list> --full-refresh` +
+`dbt build --select <changed>+`) — both refresh paths always shown (decision D3).
 
-**Refresh output — both paths, always (maintainer decision D3):**
+`--column C` prunes the WHOLE list — upstream and downstream — to the lineage of
+column `C` (fails closed, §3.2). `--additive`: see §2.5.
 
-1. **dbt commands** (the safe default): `dbt run --select <models> --full-refresh`
-   for the full-refresh set, plus `dbt build --select <changed>+`. dbt's
-   full-refresh rebuilds into a new relation and swaps atomically — no downtime,
-   but transiently needs ~2× the table's storage.
-2. **DDL alternative** (explicit `DROP TABLE <db.schema.alias> CASCADE;` per
-   full-refresh model): frees disk immediately (drop first, rebuild after), at
-   the cost of the table being absent until rebuilt and nothing surviving a
-   failed rebuild. Each statement is annotated with the downstream **view**
-   models that its `CASCADE` would also drop, since those must be rebuilt too.
-   This mirrors the maintainer's current manual practice for very large tables
-   (hundreds of millions of rows) where 2× storage is not available.
+### 2.4 `--additive` and the absorbs bucket (2.5)
 
-Both paths are always shown; the user picks per situation.
+`--additive` asserts the change only **adds** a column (no rename/drop/type
+change). A *downstream* incremental whose `on_schema_change` is
+`append_new_columns` or `sync_all_columns` can then add the column on its next
+normal run, so it moves OUT of the drop list into a visible **ABSORBS SCHEMA
+CHANGE** bucket — rather than silently reclassifying. The bucket carries the
+honest caveat: existing rows get **NULL** for the new column, so if the value is
+derivable and you need the history backfilled, drop it anyway. Additive affects
+only downstream classification; upstream incrementals are always dropped (they
+were edited). Renames/drops/type changes are never additive.
 
-### 2.4 `--json` output contract (v1 — stable)
+### 2.6 `--json` output contract (v1 — stable)
 
 - `upstream` / `downstream`: a list of objects, each
   `{unique_id, name, distance, resource_type, materialization, relation}`,
   sorted by `(distance, unique_id)`.
-- `impact`: an object with keys
-  `changed` (unique_id), `full_refresh`, `rebuild`, `snapshots`, `tests`,
-  `exposures` (each a list of unique_ids in topological order where meaningful),
-  and `ddl` — a list of
-  `{statement, relation, model, cascade_drops_views}` where
-  `cascade_drops_views` is a list of downstream view unique_ids the DROP CASCADE
-  would remove.
+- `impact`: an object with keys `changed` (unique_id), `drop_list`, `absorbs`,
+  `rebuild`, `upstream_prerequisites`, `full_refresh`, `tests`, `exposures`,
+  `snapshots` (and, with `--column`, `columns` and `unknown_models`).
+  `drop_list` is a list of
+  `{model, name, position, relation, statement, cascade_drops_views}` in
+  topological order, `position` ∈ {upstream, target, downstream}, `relation`
+  db-less. `upstream_prerequisites` and `full_refresh` are back-compat views of
+  the drop list (the `upstream` rows, and the `target`+`downstream` rows,
+  respectively). The pre-0.4.0 top-level `ddl` key is removed (its content now
+  lives inline on each `drop_list` row).
 
 Additive keys may be introduced in later versions; existing keys will not change
 meaning within v1.
@@ -141,16 +166,68 @@ and dbt-duckdb external sources both resolve).
 dbt-walker impact <model> --column <c> [--additive] [--dialect D] [--json]
 ```
 
-Prunes the model-level blast radius to descendants that actually read column
-`c`, then classifies just those into full_refresh / rebuild (same rule as §2.3)
-and emits the same dual refresh output (dbt commands + DDL). **Fails closed
-(decision D4):** any model whose column lineage cannot be fully resolved —
-`SELECT *`, dynamically generated columns, a sqlglot parse failure, or a Python
-model — stays in the blast radius, marked `unknown`, and taints everything it
-can reach. The tool never reports a model as safe to skip without proof: a false
-positive costs one unnecessary rebuild; a false negative costs a silent
-stale-data incident, so the asymmetry is deliberate. `--json` adds `column` and
-`unknown_models` keys to the §2.4 impact object.
+Prunes the drop list (§2.3) — both the upstream incrementals and the downstream
+taint — to the lineage of column `c`. Upstream: incremental ancestors on `c`'s
+upstream closure (`col-upstream`), fail-closed — where the trace dead-ends at an
+opaque model, ALL incrementals above it are kept. Downstream: incremental
+descendants that read `c` (taint). **Fails closed (decision D4):** any model
+whose column lineage cannot be fully resolved — `SELECT *` over a join,
+unqualified columns across a join without a catalog, dynamically generated
+columns, a sqlglot parse failure, or a Python model — stays in the blast radius,
+marked `unknown`, and taints everything it can reach. A false positive costs one
+unnecessary rebuild; a false negative costs a silent stale-data incident, so the
+asymmetry is deliberate. `--json` adds `columns` and `unknown_models` keys.
+
+### 3.4 `build-app` — the offline visual explorer (**shipped**)
+
+```
+dbt-walker build-app [<project-root>] [--out PATH] [--dialect D]
+```
+
+Emits ONE self-contained HTML file (mermaid vendored inline — zero network, safe
+behind a corporate proxy). The expensive analysis (sqlglot parsing, the column
+edge-graph, SQL spans, catalog status) runs once in Python at build time and is
+embedded; **all traversal — lineage walks, the drop list, column taint,
+highlighting — runs on demand in JavaScript in the browser**, mirroring the
+Python engine (kept honest by `tests/test_app_parity.py`, which runs the app's
+actual JS under node and asserts it agrees with Python). Three modes: **Lineage**
+(the bare map), **Impact** (the drop list, direction toggle filtering
+upstream/target/downstream, a DROP badge on each listed node), **Columns** (one
+collapsible group per selected column tracing COMES FROM / FEEDS DOWNSTREAM). The
+Detail pane splits into a fixed **TARGET DETAIL** section (the plan) and an
+**INSPECTING** section (the clicked node's SQL, producing lines highlighted;
+proven solid, unproven hatched). `build-app` never runs dbt; missing `target/`
+prints how to compile, and a manifest older than the model files stamps a
+staleness banner.
+
+### 3.5 Column resolution — catalog, passthrough, external (**shipped**)
+
+Beyond §3.1's compiled-SQL parsing, three mechanisms widen what resolves without
+ever failing OPEN:
+
+- **`catalog.json` (per-relation, best-effort).** If `target/catalog.json` exists
+  (`dbt docs generate`), its per-relation column inventories feed sqlglot to
+  resolve unqualified columns across joins and expand `SELECT *` over physical
+  tables. Per-relation: a relation absent from the catalog resolves exactly as
+  before; genuine ambiguity (a column on both join sides) still fails closed;
+  staleness is a warning, never a gate. Reading it never touches the warehouse.
+- **Structural passthrough (no inventory needed).** A `select *` chain — the
+  staging/dedup pattern (`select *, row_number() ... where rn = 1`) that through
+  single-source CTEs/subqueries bottoms out at ONE physical relation — is traced
+  **by name**: a real column passes through to that terminal, computed additions
+  (the `row_number`) keep their own lineage. This cannot fail open (it never
+  invents a column set) and needs no catalog, so a column threaded through
+  several `select *` layers resolves offline. A `select *` over a JOIN stays
+  fail-closed without a catalog. **NB:** this replaced an earlier plan to feed
+  manifest-declared (schema.yml) columns into sqlglot — those declarations are
+  frequently partial (measured: real sources declaring 1 of N columns), which
+  would drop the undeclared ones from the blast radius, i.e. fail OPEN.
+- **External terminals.** A column resolving to a real relation that isn't a dbt
+  node (a cross-db table, an unmanaged source) is reported as `[external]` with
+  the relation and column — a resolved answer, distinct from `unknown`. External
+  terminals do NOT taint downstream (an off-project source cannot carry an
+  in-project change). Reserved for sqlglot-confident resolutions; a relation that
+  maps ambiguously to two dbt nodes fails closed as `unknown`.
 
 ### 3.3 `graph` and `diff` (phase 3, **shipped**)
 
@@ -251,6 +328,17 @@ dbt-walker diff --state <old_manifest.json> [--json]
   per used style) and renders on GitHub; `dot` output is valid graphviz; `diff`
   of a manifest against itself is empty and detects sql/materialization/
   on_schema_change/edge changes.
+- **0.4.0 drop-list redesign (met):** `impact` (and `impact --column`) emit a
+  topologically-ordered drop list (upstream/target/downstream, db-less DDL),
+  column-pruned and fail-closed, matched against the generator's ground truth;
+  `--additive` yields the absorbs bucket. `build-app` produces a self-contained
+  offline page whose JS drop-list / taint / passthrough / external logic agrees
+  with Python (`test_app_parity`), driven end-to-end in headless Chromium
+  (`test_app_browser`, any console error fails). Structural passthrough takes
+  the real CountMoney project from 3 to 1 unresolved models with **no catalog**
+  (the 1 being a genuine `select *`-over-join), and traces
+  `int_balance_sheet_latest.lt_borr` to its source with zero unknowns.
+  Total suite: 152 tests.
 
 ---
 
@@ -261,9 +349,11 @@ dbt-walker diff --state <old_manifest.json> [--json]
 - **sqlglot dialect gaps** — Redshift `QUALIFY`-less window dedup,
   `DISTKEY`/`SORTKEY` DDL, late-binding (`bind: false`) views, `DECODE`. The
   `redshift_only/` fixture set exists specifically to surface these.
-- **`SELECT *` propagation** requires knowing upstream column inventories
-  (from `catalog.json` or inference); treated as best-effort, and falls back to
-  `unknown` (fail closed) when inventories are unavailable.
+- **`SELECT *` propagation.** A single-source `select *` chain is traced by name
+  (structural passthrough, §3.5) with no inventory; a `select *` over a join
+  needs `catalog.json` and otherwise falls back to `unknown` (fail closed).
+  Manifest-declared columns are deliberately NOT used as an inventory — real
+  declarations are too often partial, which would fail open (§3.5).
 
 ---
 

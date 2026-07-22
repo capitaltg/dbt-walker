@@ -110,17 +110,66 @@ def test_sql_has_a_line_number_gutter(page):
 
 
 @needs(SYNTH_SMALL, GEN_SMALL_CMD)
-def test_impact_mode_shows_refresh_plan_and_prerequisites(page):
-    """int_38 has incremental ancestors, so it must show the upstream refresh order."""
+def test_impact_mode_shows_drop_list_with_upstream(page):
+    """int_38 has incremental ancestors, so with direction=both the drop list
+    includes them tagged `upstream`, alongside target/downstream and the plan."""
     page.select_option("#modelPick", label="int_38")
     page.locator('#modeSeg button[data-mode="impact"]').click()
     page.wait_for_selector("#graph svg .node")
     # section labels are uppercased by CSS, so compare case-insensitively
     text = page.locator("#results").inner_text().lower()
-    assert "refresh these first" in text, "upstream prerequisites section missing"
-    assert "int_11" in text and "int_24" in text, "prerequisites should be listed in order"
-    assert "needs full refresh" in text and "rebuild normally" in text
+    assert "drop these" in text, "the merged drop list is missing"
+    assert "upstream" in text, "incremental ancestors should be tagged upstream"
+    assert "int_11" in text and "int_24" in text, "incremental ancestors should be listed"
+    assert "drop table" in text and "cascade" in text, "each drop row carries DDL"
+    assert "rebuild normally" in text
     assert "dbt build --select" in text
+
+
+@needs(SYNTH_SMALL, GEN_SMALL_CMD)
+def test_drop_list_members_are_badged_in_the_graph(page):
+    """Impact marks drop-list incrementals with a DROP badge so the graph matches
+    the plan; the target keeps its TARGET badge instead."""
+    page.select_option("#modelPick", label="int_38")
+    page.locator('#modeSeg button[data-mode="impact"]').click()
+    page.wait_for_selector("#graph svg .node")
+    # int_38 has incremental ancestors (int_11, int_24) -> DROP badges on them
+    assert page.locator("#graph .rb-drop").count() >= 1, "drop-list members should be badged"
+    assert page.locator("#graph .rb-target").count() == 1, "the target keeps TARGET, not DROP"
+
+
+@needs(SYNTH_SMALL, GEN_SMALL_CMD)
+def test_inspecting_a_node_emphasizes_its_proximal_edges(page):
+    """Clicking a node lights up the arrows immediately touching it (its direct
+    parents and children) so the local wiring reads in the graph, not just the
+    pane -- and only those edges, not the whole path."""
+    page.select_option("#modelPick", label="int_38")
+    page.locator('#modeSeg button[data-mode="lineage"]').click()
+    page.wait_for_selector("#graph svg .node")
+    assert page.locator("#graph .edge-inspect").count() == 0, "nothing inspected yet"
+
+    page.locator("#graph svg .node", has_text="int_24").first.click()
+    page.wait_for_timeout(200)
+    emphasized = page.locator("#graph .edge-inspect").count()
+    total = page.locator('#graph svg [id^="L_"]').count()
+    assert emphasized >= 1, "the inspected node's proximal edges should be emphasized"
+    assert emphasized < total, "only proximal edges, not every edge in the graph"
+
+
+@needs(SYNTH_SMALL, GEN_SMALL_CMD)
+def test_column_groups_collapse_and_expand(page):
+    """Columns mode groups each column (comes-from + feeds) into a collapsible
+    card: collapsed by default with 2+ columns, and clicking a header expands it."""
+    page.select_option("#modelPick", label="int_38")
+    page.locator('#modeSeg button[data-mode="columns"]').click()
+    pick_col(page, "col_0")
+    pick_col(page, "col_1")
+    page.wait_for_selector(".colgroup")
+    assert page.locator(".colgroup").count() == 2
+    assert page.locator(".colgroup-body").count() == 0, "2+ columns start collapsed"
+    page.locator(".colgroup-head").first.click()
+    page.wait_for_timeout(150)
+    assert page.locator(".colgroup-body").count() == 1, "clicking a header expands that group"
 
 
 @needs(SYNTH_SMALL, GEN_SMALL_CMD)
@@ -143,9 +192,9 @@ def test_column_chips_narrow_the_impact(page):
 @needs(SYNTH_SMALL, GEN_SMALL_CMD)
 def test_panes_collapse_and_resize(page):
     body = page.locator("#body")
-    page.locator("#hideTree").click()
+    page.locator("#treeHead").click()
     assert "no-tree" in (body.get_attribute("class") or "")
-    page.locator("#showTree").click()
+    page.locator("#treeHead").click()   # the header toggles the model list
     assert "no-tree" not in (body.get_attribute("class") or "")
 
     # drag the detail splitter left; the pane should get wider
@@ -186,10 +235,11 @@ def test_mode_round_trip_restores_the_view(page):
     assert page.locator("#dirPick").input_value() == "both"
 
     page.locator('#modeSeg button[data-mode="impact"]').click()
-    page.wait_for_function(
-        "n => document.querySelectorAll('#graph svg .node').length !== n", arg=lineage_nodes
-    )
-    assert page.locator("#dirPick").input_value() == "down", "impact looks downstream"
+    page.wait_for_selector("#graph svg .node")
+    assert page.locator("#dirPick").input_value() == "both", "impact now defaults to both"
+    # change direction within impact; switching modes must not leak it back
+    page.select_option("#dirPick", "down")
+    page.wait_for_timeout(200)
 
     page.locator('#modeSeg button[data-mode="lineage"]').click()
     page.wait_for_function(
@@ -259,20 +309,22 @@ def test_additive_toggle_moves_models_between_lists(page):
 
     def counts():
         t = page.locator("#results").inner_text()
-        full = t.split("NEEDS FULL REFRESH (")[1].split(")")[0]
-        rebuild = t.split("REBUILD NORMALLY (")[1].split(")")[0]
-        return int(full), int(rebuild)
+        def n(label):
+            parts = t.split(label + " (")
+            return int(parts[1].split(")")[0]) if len(parts) > 1 else 0
+        return n("DROP THESE"), n("ABSORBS SCHEMA CHANGE"), n("REBUILD NORMALLY")
 
-    full_before, rebuild_before = counts()
+    drop_b, absorb_b, rebuild_b = counts()
     page.locator("#additive").check()
     page.wait_for_timeout(250)
-    full_after, rebuild_after = counts()
-    assert full_after <= full_before, "additive can only shrink the full-refresh list"
-    assert full_after + rebuild_after == full_before + rebuild_before, "models must not vanish"
+    drop_a, absorb_a, rebuild_a = counts()
+    assert drop_a <= drop_b, "additive can only shrink the drop list"
+    assert absorb_a >= absorb_b, "absorbed incrementals move to their own bucket"
+    assert drop_a + absorb_a + rebuild_a == drop_b + absorb_b + rebuild_b, "models must not vanish"
 
     page.locator("#additive").uncheck()
     page.wait_for_timeout(250)
-    assert counts() == (full_before, rebuild_before), "unticking must restore the plan"
+    assert counts() == (drop_b, absorb_b, rebuild_b), "unticking must restore the plan"
 
 
 @needs(SYNTH_SMALL, GEN_SMALL_CMD)
@@ -288,13 +340,13 @@ def test_detail_header_is_clickable_to_collapse(page):
 
 @needs(SYNTH_SMALL, GEN_SMALL_CMD)
 def test_collapsing_panes_then_working_still_functions(page):
-    page.locator("#hideTree").click()
+    page.locator("#treeHead").click()   # fold the model list
     page.locator("#hideDetail").click()
-    page.select_option("#modelPick", label="int_38")      # work with both panes hidden
+    page.select_option("#modelPick", label="int_38")      # rail + picker stay usable
     page.wait_for_selector("#graph svg .node")
     page.locator("#showDetail").click()
     assert "int_38" in page.locator("#results").inner_text(), "detail must catch up after reopening"
-    page.locator("#showTree").click()
+    page.locator("#treeHead").click()   # unfold the list
     assert page.locator('#treeBody .tree-item[aria-current="true"]').count() == 1
 
 
@@ -340,7 +392,7 @@ def test_help_panel_explains_the_controls(page):
     page.locator("#helpBtn").click()
     text = page.locator("#help .card").inner_text().lower()
     for topic in ("lineage", "impact", "columns", "incremental",
-                  "additive", "refresh these first"):
+                  "additive", "drop list"):
         assert topic in text, f"help should explain {topic}"
     page.keyboard.press("Escape")
     assert page.locator("#help").is_hidden()
@@ -354,9 +406,11 @@ def test_changed_model_is_in_its_own_refresh_plan(page):
     page.locator('#modeSeg button[data-mode="impact"]').click()
     page.wait_for_selector("#graph svg .node")
     text = page.locator("#results").inner_text()
-    full_section = text.split("NEEDS FULL REFRESH")[1].split("REBUILD NORMALLY")[0]
-    assert "int_38" in full_section, "the changed incremental must be in the full-refresh list"
-    assert "DROP TABLE" in text and "int_38" in text.split("DROP FIRST")[1]
+    drop_section = text.split("DROP THESE")[1].split("REBUILD NORMALLY")[0]
+    # the changed incremental is in the drop list, tagged `target`, with its DDL
+    assert "int_38" in drop_section, "the changed incremental must be in the drop list"
+    assert "target" in drop_section.lower()
+    assert "DROP TABLE" in drop_section and "int_38" in drop_section
 
 
 @needs(SYNTH_SMALL, GEN_SMALL_CMD)
@@ -448,7 +502,7 @@ def nocat_page(real_app_no_catalog):
 
 def _open_real_column(pg, model="stock_picks", column="current_ratio"):
     pg.select_option("#modelPick", label=model)
-    pg.click("text=Columns")
+    pg.locator('#modeSeg button[data-mode="columns"]').click()
     pg.wait_for_selector("#graph svg .node")
     pick_col(pg, column)
     pg.wait_for_timeout(600)
@@ -489,18 +543,21 @@ def test_highlight_is_scrolled_into_view(real_page):
 
 @needs(COUNTMONEY, FETCH_CMD)
 def test_unresolved_model_nudges_toward_a_remedy(nocat_page):
-    """A `select *` model's columns can't be traced (no catalog) -- instead of a
-    bare 'lineage unresolved', an info affordance explains why and points at
-    `dbt docs generate`. A resolved model shows no such affordance."""
-    nocat_page.click("text=Columns")
-    nocat_page.select_option("#modelPick", label="int_balance_sheet_latest")
+    """A `select *` model that STILL can't be traced (no catalog) -- here a
+    `select *` over a JOIN, genuinely ambiguous -- shows an info affordance that
+    explains why and points at `dbt docs generate` instead of a bare 'lineage
+    unresolved'. A model resolved by structural passthrough shows no affordance."""
+    nocat_page.locator('#modeSeg button[data-mode="columns"]').click()
+    # int_income_statement_latest ends `select * from ... join ... using(...)`,
+    # which structural passthrough can't disambiguate without a catalog
+    nocat_page.select_option("#modelPick", label="int_income_statement_latest")
     nocat_page.wait_for_timeout(300)
     assert nocat_page.locator("#colHint").is_visible(), "unresolved model needs the nudge"
     tip = nocat_page.locator("#colHint").get_attribute("data-tip")
     assert "dbt docs generate" in tip and "select *" in tip
 
-    # a fully-resolved model must NOT show it
-    nocat_page.select_option("#modelPick", label="stg_tushare_stock_basic")
+    # a model resolved by passthrough (no catalog needed) must NOT show it
+    nocat_page.select_option("#modelPick", label="int_balance_sheet_latest")
     nocat_page.wait_for_timeout(300)
     assert nocat_page.locator("#colHint").is_hidden(), "resolved model should not nudge"
 
@@ -514,7 +571,7 @@ def test_column_graph_shows_both_directions_and_labels(real_page):
     so int_balance_sheet_latest resolves."""
     pg = real_page
     pg.select_option("#modelPick", label="int_balance_sheet_latest")
-    pg.click("text=Columns")
+    pg.locator('#modeSeg button[data-mode="columns"]').click()
     pg.wait_for_selector("#graph svg .node")
     pick_col(pg, "lt_borr")
     pg.wait_for_timeout(600)
@@ -525,9 +582,10 @@ def test_column_graph_shows_both_directions_and_labels(real_page):
     assert "feeds" in labels, "upstream nodes should show which columns feed the selection"
     assert "from" in labels, "downstream nodes should show which source column they derive from"
 
-    # detail pane groups downstream by the source column
-    results = pg.locator("#results").inner_text()
-    assert "by source column" in results.lower()
+    # the detail pane groups each column (single column -> expanded), with a
+    # COMES FROM trace and a FEEDS DOWNSTREAM list
+    results = pg.locator("#results").inner_text().lower()
+    assert "comes from" in results and "feeds downstream" in results
     assert "lt_borr" in results and "insolvent_index" in results
 
 
@@ -537,7 +595,7 @@ def test_untraceable_columns_are_labelled(nocat_page):
     as unproven rather than presenting them as proven findings. (Uses the
     no-catalog build -- with a catalog these columns resolve and aren't unproven.)"""
     nocat_page.select_option("#modelPick", label="int_income_pivoted_to_stock")
-    nocat_page.click("text=Columns")
+    nocat_page.locator('#modeSeg button[data-mode="columns"]').click()
     nocat_page.wait_for_selector("#graph svg .node")
     pick_col(nocat_page, "last_end_date")
     nocat_page.wait_for_timeout(700)
@@ -557,7 +615,7 @@ def test_untraceable_columns_are_labelled(nocat_page):
 def test_proven_columns_are_not_labelled(real_page):
     """The marker must not cry wolf: a fully traced model shows no unproven pill."""
     real_page.select_option("#modelPick", label="stg_tushare_stock_basic")
-    real_page.click("text=Columns")
+    real_page.locator('#modeSeg button[data-mode="columns"]').click()
     real_page.wait_for_selector("#graph svg .node")
     real_page.locator("#colBtn").click()
     real_page.wait_for_selector("#colPop:not([hidden])")
@@ -572,18 +630,19 @@ def test_proven_columns_are_not_labelled(real_page):
 
 
 @needs(SYNTH_SMALL, GEN_SMALL_CMD)
-def test_collapsing_tree_keeps_the_graph_visible(page):
-    """Regression: hiding the tree (the first grid item) with display:none let the
-    graph shift into the 0-width column, collapsing it. Panes are now pinned to
-    their grid columns, so the graph keeps its width when the tree collapses."""
+def test_collapsing_tree_folds_list_but_keeps_rail_and_graph(page):
+    """Folding the model list keeps the always-visible control rail (Model picker
+    etc.) and doesn't disturb the graph -- the list just tucks away."""
     page.select_option("#modelPick", label="mart_0")
     page.wait_for_selector("#graph svg .node")
     before = page.locator("main.graph").evaluate("e => e.getBoundingClientRect().width")
-    assert before > 400
-    page.locator("#hideTree").click()
-    page.wait_for_timeout(300)
+    assert page.locator("#treeBody").is_visible()
+    page.locator("#treeHead").click()
+    page.wait_for_timeout(200)
+    assert not page.locator("#treeBody").is_visible(), "the model list should fold away"
+    assert page.locator("#modelPick").is_visible(), "the control rail stays put"
     after = page.locator("main.graph").evaluate("e => e.getBoundingClientRect().width")
-    assert after > before, f"graph must GROW when the tree collapses, not vanish (was {before}, now {after})"
+    assert abs(after - before) < 3, "the graph keeps its width; the rail column persists"
 
 
 @needs(SYNTH_SMALL, GEN_SMALL_CMD)
@@ -677,8 +736,10 @@ def test_target_inspecting_roles_and_legend(page):
     page.wait_for_timeout(200)
     assert page.locator("#graph .rb-inspect").count() == 1
     assert page.locator("#graph .selring").count() == 0, "ring only when the target itself is selected"
-    assert "inspecting" in (page.locator("#detailHead").get_attribute("class") or "")
-    assert "INSPECTING" in page.locator("#detailHead h2").inner_text()
+    # the INSPECTING detail section lights up and echoes the inspected node's name
+    assert "on" in (page.locator("#inspectSec").get_attribute("class") or "")
+    assert page.locator("#inspectName").inner_text() == "int_39"
+    assert page.locator("#targetName").inner_text() == "mart_0"
 
     # inspect the target node itself -> ring + both badges, no in-node hint
     page.locator("#graph svg .node", has_text="mart_0").first.click()
@@ -698,8 +759,8 @@ def test_target_inspecting_roles_and_legend(page):
 
 
 @needs(SYNTH_SMALL, GEN_SMALL_CMD)
-def test_collapsed_side_tabs_are_tall(page):
-    """The reveal tabs for collapsed panes should be tall/noticeable, not tiny."""
-    page.locator("#hideTree").click()
-    box = page.locator("#showTree").bounding_box()
+def test_collapsed_detail_tab_is_tall(page):
+    """The reveal tab for the collapsed detail pane should be tall/noticeable."""
+    page.locator("#hideDetail").click()
+    box = page.locator("#showDetail").bounding_box()
     assert box["height"] >= 80, f"reveal tab should be tall, got {box['height']}"

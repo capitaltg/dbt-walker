@@ -222,6 +222,87 @@ def parse_columns(sql: str, dialect: str,
     return columns
 
 
+def _passthrough_step(scope, computed: dict) -> object | None:
+    """One link in a passthrough chain. A scope qualifies when its projections
+    are a star (``*`` / ``t.*``) plus only *named computed* additions — window
+    functions, aggregates, expressions — but NO bare-column projection or rename
+    (which would change the passed-through set). Records each computed addition's
+    resolved leaves into ``computed`` (keyed by output name), and returns the
+    scope's single FROM source (an ``exp.Table`` or a nested scope), or None to
+    disqualify the whole chain (fail closed).
+    """
+    expr = scope.expression
+    selects = getattr(expr, "selects", None)
+    if not selects:
+        return None
+    saw_star = False
+    for proj in selects:
+        inner = proj.this if isinstance(proj, exp.Alias) else proj
+        if _is_select_star(inner):
+            saw_star = True
+            continue
+        if isinstance(inner, exp.Column):
+            return None  # a bare column or `a as b` rename -> not a clean passthrough
+        name = proj.alias_or_name
+        if not name:
+            return None  # unnamed expression alongside a star -> bail (safe)
+        leaves = _resolve_leaves(scope, proj)
+        if leaves is None:
+            computed.setdefault(name, [(None, "", UNKNOWN)])
+        else:
+            transform = _classify(inner, name)
+            computed.setdefault(name, [(r, c, transform) for r, c in sorted(set(leaves))])
+    if not saw_star:
+        return None
+    srcs = _from_sources(scope)
+    if len(srcs) != 1:
+        return None
+    return next(iter(srcs.values()))
+
+
+def passthrough_analyze(sql: str, dialect: str,
+                        schema: dict | None = None
+                        ) -> tuple[str, dict[str, list[tuple[str | None, str, str]]]] | None:
+    """Analyze a model that ``parse_columns`` couldn't fully enumerate, to see if
+    it's a *passthrough chain*: a ``select *`` that (through single-source CTEs /
+    subqueries, possibly adding computed columns like a dedup ``row_number()``)
+    bottoms out at one physical relation.
+
+    Returns ``(terminal_relation, computed)`` where ``terminal_relation`` is the
+    normalized bottom relation every star column passes through to (by name), and
+    ``computed`` maps each named computed addition to its own resolved leaves
+    (so ``rn1`` traces to its partition/order columns, never fails open). Any
+    column NOT in ``computed`` is a clean passthrough to ``terminal_relation``.
+
+    None when it isn't such a chain (a join, a rename, an unnamed expr) — the
+    model then stays unresolved (fail closed), exactly as before. This can never
+    fail OPEN: it never invents a column set, and every computed column keeps its
+    real lineage.
+    """
+    _require_sqlglot()
+    if not sql or not sql.strip():
+        return None
+    try:
+        tree = sqlglot.parse_one(sql, dialect=dialect)
+        qualified = qualify(tree, dialect=dialect, schema=schema,
+                            validate_qualify_columns=False)
+        scope = build_scope(qualified)
+    except Exception:
+        return None
+    if scope is None:
+        return None
+    computed: dict[str, list[tuple[str | None, str, str]]] = {}
+    current = scope
+    for _ in range(64):  # guard against pathological nesting
+        step = _passthrough_step(current, computed)
+        if step is None:
+            return None
+        if isinstance(step, exp.Table):
+            return (_relation_name(step), computed)
+        current = step
+    return None
+
+
 def _paren_depths(tokens, TT) -> list[int]:
     """Depth each token sits AT (a paren pair's own tokens share the outer depth)."""
     out, depth = [], 0
@@ -517,15 +598,38 @@ def _resolve_through_star(scope, colname: str) -> list[tuple[str, str]] | None:
 
 @dataclass
 class ColumnEdge:
-    parent: str | None  # parent unique_id, or None when the leaf is unknown
-    column: str | None  # parent column name, or None when unknown
+    """One resolved source of an output column. Three shapes:
+
+    - **internal**: ``parent`` is a dbt unique_id (the usual case).
+    - **external**: ``parent is None`` but ``parent_rel`` names a real physical
+      relation that isn't a dbt node (a cross-db table, an unmanaged source).
+      ``column`` and ``transform`` are real — we KNOW where it comes from, it
+      just isn't in the project. Never a fail-closed unknown.
+    - **unknown**: ``parent is None`` and ``parent_rel is None`` — we couldn't
+      attribute the column at all (``transform == "unknown"``). Fails closed.
+    """
+    parent: str | None  # parent unique_id, or None for external/unknown
+    column: str | None  # parent column name, or None when genuinely unknown
     transform: str
+    parent_rel: str | None = None  # physical relation when parent is unmapped (external)
+
+    @property
+    def is_external(self) -> bool:
+        return self.parent is None and self.parent_rel is not None
+
+    @property
+    def is_unknown(self) -> bool:
+        return self.parent is None and self.parent_rel is None
 
 
 @dataclass
 class ModelColumns:
     resolved: bool  # False => whole model is unknown (fail closed)
     columns: dict[str, list[ColumnEdge]] = field(default_factory=dict)
+    # set when the model is a pure `select *` over one physical relation (a
+    # staging passthrough). We can't enumerate `columns` without an inventory,
+    # but ANY column resolves as <passthrough>.<col> by name. resolved is True.
+    passthrough: str | None = None
 
 
 class ColumnGraph:
@@ -551,12 +655,31 @@ class ColumnGraph:
         # relation string -> unique_id, for mapping SQL FROM leaves back to nodes.
         # dbt's own `relation_name` is exactly what appears in compiled SQL (real
         # tables and duckdb external sources alike); fall back to the composed
-        # database.schema.alias when a node lacks it.
+        # database.schema.alias when a node lacks it. Keys are normalized (quoting
+        # dropped, lowercased) so a quoted/mixed-case FROM matches its node.
+        # If two nodes normalize to the SAME relation (a pathological dbt project
+        # where two models clobber one table), we can't disambiguate -> drop both
+        # and let that relation fail closed (unknown), never guess a node.
         self._rel_to_uid: dict[str, str] = {}
+        self._collision_rels: set[str] = set()
         for uid, node in graph.nodes.items():
             rel = node.get("relation_name") or graph.relation(uid)
-            if rel:
-                self._rel_to_uid[_norm(rel)] = uid
+            if not rel:
+                continue
+            key = _norm(rel)
+            if key in self._rel_to_uid and self._rel_to_uid[key] != uid:
+                self._collision_rels.add(key)
+            else:
+                self._rel_to_uid[key] = uid
+        for key in self._collision_rels:
+            self._rel_to_uid.pop(key, None)
+
+    def relation_uid(self, rel: str | None) -> str | None:
+        """The dbt node a (normalized) relation maps to, or None when it's an
+        external / collision relation (fail closed)."""
+        if not rel or rel in self._collision_rels:
+            return None
+        return self._rel_to_uid.get(rel)
 
     # -- per-model parsing -------------------------------------------------- #
 
@@ -575,16 +698,34 @@ class ColumnGraph:
             # sources/seeds/snapshots are leaves: no upstream column lineage,
             # but they aren't "unknown" either — treat as resolved with no edges.
             return ModelColumns(resolved=True)
-        parsed = parse_columns(self._compiled_sql(uid) or "", self.dialect, self._schema)
+        sql = self._compiled_sql(uid) or ""
+        parsed = parse_columns(sql, self.dialect, self._schema)
         if parsed is None:
-            return ModelColumns(resolved=False)  # python model / SELECT * / parse error
-        columns = {
-            name: [ColumnEdge(self._rel_to_uid.get(rel) if rel else None,
-                              col or None, transform)
-                   for rel, col, transform in leaves]
-            for name, leaves in parsed.items()
-        }
+            # not fully enumerable — but a `select *` chain over one source (the
+            # staging / dedup pattern) passes its columns through by name. Resolve
+            # the computed additions explicitly; everything else passes through.
+            info = passthrough_analyze(sql, self.dialect, self._schema)
+            if info is not None:
+                terminal, computed = info
+                columns = {name: [self._edge(r, c, t) for r, c, t in leaves]
+                           for name, leaves in computed.items()}
+                return ModelColumns(resolved=True, columns=columns, passthrough=terminal)
+            return ModelColumns(resolved=False)  # python model / unexpandable * / parse error
+        columns = {name: [self._edge(rel, col, transform) for rel, col, transform in leaves]
+                   for name, leaves in parsed.items()}
         return ModelColumns(resolved=True, columns=columns)
+
+    def _edge(self, rel: str | None, col: str, transform: str) -> ColumnEdge:
+        """Classify a parsed leaf into an internal / external / unknown edge.
+        ``rel`` is already normalized (from ``parse_columns``)."""
+        if rel is None:
+            return ColumnEdge(None, None, transform)              # parser gave up: unknown
+        if rel in self._collision_rels:
+            return ColumnEdge(None, None, UNKNOWN)                # ambiguous node: fail closed
+        uid = self._rel_to_uid.get(rel)
+        if uid is not None:
+            return ColumnEdge(uid, col or None, transform)        # internal
+        return ColumnEdge(None, col or None, transform, parent_rel=rel)  # external (known, off-project)
 
     # -- traversal ---------------------------------------------------------- #
 
@@ -599,14 +740,37 @@ class ColumnGraph:
         if not mc.resolved:
             trace.add(uid, column, None, None, UNKNOWN, dist)
             return
-        for edge in mc.columns.get(column, []):
-            key = (uid, column, edge.parent, edge.column)
+        if mc.passthrough is not None and column not in mc.columns:
+            # a `select *` chain: this column isn't a computed addition, so it
+            # passes through by name to the terminal relation
+            edges = [self._edge(mc.passthrough, column, "passthrough")]
+        else:
+            edges = mc.columns.get(column, [])
+        for edge in edges:
+            key = (uid, column, edge.parent, edge.column, edge.parent_rel)
             if key in seen:
                 continue
             seen.add(key)
-            trace.add(uid, column, edge.parent, edge.column, edge.transform, dist)
+            trace.add(uid, column, edge.parent, edge.column, edge.transform, dist,
+                      parent_rel=edge.parent_rel)
+            # recurse only into dbt nodes; external terminals and unknowns stop here
             if edge.parent is not None and edge.column is not None:
                 self._walk_up(edge.parent, edge.column, dist + 1, trace, seen)
+
+    @staticmethod
+    def _col_reads_change(edges, tainted) -> bool:
+        """Does a column with these edges read a tainted (parent, column)? An
+        unknown leaf fails closed (True); an external terminal never does."""
+        for edge in edges:
+            if edge.is_unknown:  # couldn't attribute it -> fail closed
+                return True
+            if edge.parent is None:  # external terminal: known off-project source
+                continue
+            if (edge.parent, edge.column) in tainted:
+                return True
+            if (edge.parent, "*") in tainted:  # parent was opaque
+                return True
+        return False
 
     def taint_downstream(self, root: str, column: str) -> "TaintResult":
         """Propagate a change to root.column through the downstream model DAG,
@@ -631,18 +795,22 @@ class ColumnGraph:
                 tainted.add((uid, "*"))
                 continue
             model_hit = False
+            # explicit columns (all columns for a normal model; the computed
+            # additions for a passthrough chain) — check their edges directly
             for col, edges in mc.columns.items():
-                hit = False  # per-column: does THIS column read the change?
-                for edge in edges:
-                    if edge.parent is None:  # unknown leaf -> fail closed
-                        hit = True
-                    elif (edge.parent, edge.column) in tainted:
-                        hit = True
-                    elif (edge.parent, "*") in tainted:  # parent was opaque
-                        hit = True
-                if hit:
+                if self._col_reads_change(edges, tainted):
                     tainted.add((uid, col))
                     model_hit = True
+            if mc.passthrough is not None:
+                # every other column passes through by name: inherit the terminal
+                # relation's tainted columns (and its opacity marker). External /
+                # collision terminal -> no in-project source -> nothing to inherit.
+                src = self._rel_to_uid.get(mc.passthrough)
+                if src is not None:
+                    for (u, c) in [t for t in tainted if t[0] == src]:
+                        if c not in mc.columns:
+                            tainted.add((uid, c))
+                            model_hit = True
             if model_hit:
                 affected.add(uid)
 
@@ -653,7 +821,7 @@ class ColumnGraph:
 class ColumnTrace:
     edges: list[dict] = field(default_factory=list)
 
-    def add(self, uid, column, parent, parent_col, transform, distance) -> None:
+    def add(self, uid, column, parent, parent_col, transform, distance, parent_rel=None) -> None:
         self.edges.append(
             {
                 "model": uid,
@@ -662,6 +830,7 @@ class ColumnTrace:
                 "parent_column": parent_col,
                 "transform": transform,
                 "distance": distance,
+                "parent_relation": parent_rel,  # set when the leaf is an external relation
             }
         )
 

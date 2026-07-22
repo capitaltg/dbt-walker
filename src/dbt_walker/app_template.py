@@ -38,14 +38,41 @@ _TEMPLATE = r"""<!doctype html>
 
 *{box-sizing:border-box}
 html,body{height:100%}
+html{font-size:17.5px}   /* base for all rem sizes -- nudged up for legibility */
 body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
-  font-size:15.5px;line-height:1.5;display:flex;flex-direction:column;overflow:hidden}
+  font-size:1rem;line-height:1.5;display:flex;flex-direction:column;overflow:hidden}
 
 /* ---------- header + controls ---------- */
-header.top{padding:.5rem .9rem;border-bottom:1px solid var(--line);background:var(--panel);
-  display:flex;align-items:baseline;gap:.7rem;flex-wrap:wrap}
+header.top{padding:.45rem .9rem;border-bottom:1px solid var(--line);background:var(--panel);
+  display:flex;align-items:center;gap:.7rem}
+header.top .top-title{display:flex;align-items:baseline;gap:.7rem;flex-wrap:wrap;min-width:0}
 header.top h1{font-size:.95rem;margin:0;letter-spacing:-.01em}
 header.top .meta{font-family:var(--mono);font-size:.75rem;color:var(--muted)}
+
+/* left control rail: the "what am I asking" controls, stacked, above the model list */
+.rail{display:flex;flex-direction:column;gap:.6rem;padding:.6rem .6rem .7rem;
+  border-bottom:1px solid var(--line)}
+.rail .ctl{flex-direction:column;align-items:stretch;gap:.25rem}
+.rail .ctl select{width:100%}
+.rail .switch{margin-top:.1rem}
+.seg.vert{flex-direction:column;overflow:visible}   /* don't clip the button tooltips */
+.seg.vert button{text-align:left;padding:.3rem .55rem;border-bottom:1px solid var(--line)}
+.seg.vert button:first-child{border-radius:6px 6px 0 0}
+.seg.vert button:last-child{border-bottom:0;border-radius:0 0 6px 6px}
+/* rail tooltips open to the RIGHT (into the graph) so they aren't clipped by the
+   narrow sidebar and don't cover the control stacked below */
+.rail [data-tip]:hover::after,.rail [data-tip]:focus-visible::after{
+  left:calc(100% + 10px);top:0;max-width:17rem}
+.tree-section{display:flex;flex-direction:column;min-height:0;flex:1}
+.tree-filter{padding:.4rem .6rem 0}
+
+/* thin control strip above the graph: the growing column chips + the type filter */
+.graph-toolbar{display:flex;align-items:center;gap:.9rem;padding:.4rem .7rem;
+  border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+.graph-toolbar .gb-cols{flex:1;min-width:0}
+.graph-toolbar .gb-show{flex:none}
+/* graph area below the toolbar: the positioning context for the legend/note overlays */
+.graph-area{position:relative;flex:1;min-height:0;display:flex;flex-direction:column}
 .banner{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--ink);
   border-bottom:1px solid var(--line);padding:.4rem .9rem;font-size:.8rem}
 .banner b{color:var(--warn)}
@@ -99,6 +126,7 @@ select,input[type=search]{font:inherit;font-size:.85rem;background:var(--ground)
 [data-tip]{position:relative}
 [data-tip]:hover::after,[data-tip]:focus-visible::after{content:attr(data-tip);position:absolute;
   left:0;top:calc(100% + 6px);z-index:50;width:max-content;max-width:19rem;white-space:normal;
+  pointer-events:none;   /* a tooltip must never intercept a click on the control beneath it */
   background:var(--ink);color:var(--ground);font-family:var(--sans);font-size:.72rem;
   line-height:1.35;padding:.4rem .55rem;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.25)}
 .info{display:inline-flex;align-items:center;justify-content:center;width:1rem;height:1rem;
@@ -128,25 +156,28 @@ select,input[type=search]{font:inherit;font-size:.85rem;background:var(--ground)
 
 /* ---------- 3-pane body ---------- */
 .body{flex:1;display:grid;min-height:0;
-  grid-template-columns:var(--tree-w,230px) 1fr var(--detail-w,440px)}
-.body.no-tree{grid-template-columns:0 1fr var(--detail-w,440px)}
-.body.no-detail{grid-template-columns:var(--tree-w,230px) 1fr 0}
-.body.no-tree.no-detail{grid-template-columns:0 1fr 0}
+  grid-template-columns:var(--tree-w,210px) 1fr var(--detail-w,440px)}
+/* the left pane holds the always-visible control rail, so collapsing the model
+   list keeps the column (just folds the list); only detail can zero its column */
+.body.no-detail{grid-template-columns:var(--tree-w,210px) 1fr 0}
 .pane{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--panel);
   overflow:hidden}
 /* pin each pane to its grid column: hiding one with display:none must NOT let the
-   others shuffle left into the wrong (0-width) column -- that borked the graph
-   whenever the tree was collapsed */
-.pane.tree{border-right:1px solid var(--line);grid-column:1}
+   others shuffle left into the wrong (0-width) column */
+/* overflow:visible so rail tooltips can spill into the graph; the model list
+   still scrolls inside its own overflow:auto body, so nothing else escapes */
+.pane.rail-pane{border-right:1px solid var(--line);grid-column:1;position:relative;overflow:visible;z-index:2}
 .pane.graph{grid-column:2}
 .pane.detail{border-left:1px solid var(--line);position:relative;grid-column:3}
 /* drag the pane edges to resize */
 .splitter{position:absolute;top:0;width:7px;height:100%;cursor:col-resize;z-index:6}
 .splitter:hover,.splitter.active{background:color-mix(in srgb,var(--accent) 45%,transparent)}
 .pane.detail .splitter{left:-4px}
-.pane.tree{position:relative}
-.pane.tree .splitter{right:-4px}
-.body.no-tree .pane.tree,.body.no-detail .pane.detail{display:none}
+.pane.rail-pane .splitter{right:-4px}
+.body.no-detail .pane.detail{display:none}
+/* fold just the model list (search + tree), keeping the rail + Models header */
+.body.no-tree #treeSearch,.body.no-tree #treeBody{display:none}
+.body.no-tree #treeHead .collapse{transform:rotate(180deg)}
 .pane-head{display:flex;align-items:center;justify-content:space-between;gap:.4rem;
   padding:.45rem .6rem;border-bottom:1px solid var(--line)}
 .pane-head h2{font-family:var(--mono);font-size:.65rem;letter-spacing:.08em;text-transform:uppercase;
@@ -245,6 +276,30 @@ select,input[type=search]{font:inherit;font-size:.85rem;background:var(--ground)
   padding:.08rem .5rem;border-radius:3px;letter-spacing:.04em}
 #detailHead .insp-name{font-family:var(--mono);font-size:.75em;font-weight:400}
 
+/* two themed sections: TARGET DETAIL (the plan, red) over INSPECTING (the SQL, blue) */
+.det-sec{border-left:3px solid transparent;padding:.1rem .1rem .1rem .55rem;margin-bottom:1rem}
+.det-shead{display:flex;align-items:center;gap:.45rem;font-family:var(--mono);font-size:.72rem;
+  letter-spacing:.06em;margin:.1rem 0 .5rem;color:var(--muted)}
+.det-badge{font-size:.62rem;font-weight:700;padding:.1rem .5rem;border-radius:3px;letter-spacing:.04em}
+.det-shead #targetName,.det-shead #inspectName{font-family:var(--mono);font-size:.9em}
+.det-target{border-left-color:var(--changed)}
+.det-target .det-badge{background:color-mix(in srgb,var(--changed) 20%,transparent);color:var(--changed)}
+.det-inspect{border-left-color:color-mix(in srgb,var(--inspect) 45%,transparent)}
+.det-inspect .det-badge{background:color-mix(in srgb,var(--inspect) 22%,transparent);
+  color:color-mix(in srgb,var(--inspect) 88%,var(--ink))}
+/* glow the inspect section while a node is actually being inspected */
+.det-inspect.on{border-left-color:var(--inspect)}
+.det-inspect.on .det-badge{background:var(--inspect);color:#14161b}
+
+/* collapsible per-column groups (Columns mode) */
+.colgroup{border:1px solid var(--line);border-radius:7px;margin:.4rem 0;overflow:hidden}
+.colgroup-head{display:flex;align-items:center;gap:.4rem;padding:.4rem .55rem;cursor:pointer;
+  font-family:var(--mono);font-size:.92rem;background:color-mix(in srgb,var(--ink) 4%,transparent)}
+.colgroup-head:hover{background:color-mix(in srgb,var(--ink) 8%,transparent)}
+.colgroup-head .chev{color:var(--muted);width:.9em;flex:none}
+.colgroup-sub{margin-left:auto;font-size:.75rem;color:var(--muted)}
+.colgroup-body{padding:.15rem .55rem .45rem}
+
 /* results + sql */
 .section-label{font-family:var(--mono);font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;
   color:var(--muted);margin:.8rem 0 .35rem}
@@ -257,6 +312,10 @@ select,input[type=search]{font:inherit;font-size:.85rem;background:var(--ground)
 .pill.warn{background:color-mix(in srgb,var(--warn) 22%,transparent);color:var(--warn)}
 .pill.ok{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}
 .pill.unknown{background:color-mix(in srgb,var(--muted) 22%,transparent);color:var(--muted)}
+/* drop-list position tags: upstream feeds it, target is the change, downstream reads it */
+.pill.pos-upstream{background:color-mix(in srgb,#a78bfa 24%,transparent);color:#a78bfa}
+.pill.pos-target{background:color-mix(in srgb,var(--changed) 20%,transparent);color:var(--changed)}
+.pill.pos-downstream{background:color-mix(in srgb,var(--warn) 22%,transparent);color:var(--warn)}
 pre.cmd{font-family:var(--mono);font-size:.78rem;background:var(--ground);border:1px solid var(--line);
   border-radius:6px;padding:.4rem .5rem;overflow-x:auto;margin:.25rem 0;white-space:pre-wrap;
   overflow-wrap:break-word;word-break:normal}
@@ -294,48 +353,13 @@ ul.cols em{font-style:normal;color:var(--accent)}
 </head>
 <body>
 <header class="top">
-  <h1>__PROJECT__ <span style="color:var(--muted);font-weight:400">· dbt lineage explorer</span></h1>
-  <span class="meta" id="provenance"></span>
-</header>
-<div id="staleBanner" class="banner" hidden></div>
-
-<div class="controls">
-  <div class="ctl">
-    <label for="modelPick">Model</label>
-    <select id="modelPick" data-tip="The model you're changing. Everything else follows from this."></select>
-  </div>
-  <div class="ctl">
-    <label>Mode</label>
-    <div class="seg" id="modeSeg">
-      <button data-mode="lineage" aria-pressed="true" data-tip="What this model reads from and what reads it.">Lineage</button>
-      <button data-mode="impact" aria-pressed="false" data-tip="If I change this, what must I drop / full-refresh and what just rebuilds?">Impact</button>
-      <button data-mode="columns" aria-pressed="false" data-tip="Where a column comes from and what derives from it.">Columns</button>
-    </div>
-  </div>
-  <div class="ctl">
-    <label for="colBtn">Columns</label>
-    <button id="colBtn" class="colbtn" data-tip="Narrow to specific columns &mdash; the result is everything affected by ANY of them. Opens a picker: click a column on the left to add it, click one on the right to remove it. Leave empty to treat it as a whole-model change.">+ add columns</button>
-    <span id="colHint" class="info" hidden>i</span>
-    <span class="chips" id="colChips"></span>
-  </div>
-  <div class="ctl">
-    <label for="dirPick">Direction</label>
-    <select id="dirPick" data-tip="Which way to walk from the model. Impact only looks downstream &mdash; a change can't affect what feeds it.">
-      <option value="both">both</option><option value="down">downstream</option><option value="up">upstream</option>
-    </select>
-  </div>
-  <label class="switch" data-tip="Only ADDING columns? Incrementals set to append_new_columns or sync_all_columns absorb additive changes without a full refresh. Renames, drops and type changes never do.">
-    <input type="checkbox" id="additive"> additive change
-  </label>
-  <div class="ctl">
-    <label for="matPick">Show</label>
-    <select id="matPick" data-tip="Filter the graph by materialization: how dbt persists a model. view = recomputed on query; table = rebuilt every run; incremental = only new rows added, so these need a full refresh when logic changes.">
-      <option value="">all types</option><option value="incremental">incremental only</option>
-      <option value="table">table only</option><option value="view">view only</option>
-    </select>
+  <div class="top-title">
+    <h1>__PROJECT__ <span style="color:var(--muted);font-weight:400">· dbt lineage explorer</span></h1>
+    <span class="meta" id="provenance"></span>
   </div>
   <button id="helpBtn" title="What do these controls do?" aria-label="Help">?</button>
-</div>
+</header>
+<div id="staleBanner" class="banner" hidden></div>
 
 <div id="colPop" class="colpop" hidden>
   <div class="colpop-head"><b>Columns</b> <span id="colPopModel"></span>
@@ -361,9 +385,9 @@ ul.cols em{font-style:normal;color:var(--accent)}
       <dd><span class="q">"What's connected to this model?"</span> Just the map: what feeds it,
           what reads it. No advice, no judgement &mdash; use it to get your bearings.</dd>
       <dt>Impact</dt>
-      <dd><span class="q">"I'm changing this. What do I have to rebuild, and how?"</span> Splits
-          everything into <b>needs full refresh</b> (expensive) and <b>rebuild normally</b> (free),
-          gives you the dbt commands, and lists upstream incrementals to refresh first.</dd>
+      <dd><span class="q">"I'm changing this &mdash; which models do I drop now?"</span> Gives you
+          one ordered <b>drop list</b> of every incremental on the change's lineage (see below),
+          plus the dbt commands and what just rebuilds for free.</dd>
       <dt>Columns</dt>
       <dd><span class="q">"Where does this column come from, and what's built on it?"</span> Traces
           one column back to its source and forward to everything derived from it.</dd>
@@ -384,11 +408,13 @@ ul.cols em{font-style:normal;color:var(--accent)}
 
     <h3>Additive change</h3>
     <p>Tick this only when you're <b>adding new columns</b> &mdash; not renaming, dropping, or
-       changing types. Incremental models configured with <code>append_new_columns</code> or
-       <code>sync_all_columns</code> can absorb a brand-new column on their own, so ticking it moves
-       them from "needs full refresh" to "rebuild normally" and saves you the rebuild.</p>
-    <p>Leave it off for anything else: a rename or type change <b>cannot</b> be absorbed, because
-       the existing rows were computed the old way.</p>
+       changing types. A downstream incremental configured with <code>append_new_columns</code> or
+       <code>sync_all_columns</code> can add a brand-new column on its own next run, so ticking it
+       moves that model out of the drop list into an <b>absorbs schema change</b> bucket.</p>
+    <p>But those existing rows get <b>NULL</b> for the new column &mdash; so if the value is
+       derivable and you need the history filled in (a backfill), drop it anyway. Leave additive off
+       for anything else: a rename or type change <b>cannot</b> be absorbed, because the existing rows
+       were computed the old way.</p>
 
     <h3>"unproven" columns</h3>
     <p>Some SQL can't be traced column-by-column: an unqualified column read across a join,
@@ -398,10 +424,15 @@ ul.cols em{font-style:normal;color:var(--accent)}
     <p>Read it as <i>"we couldn't tell, so it's included"</i>, not <i>"this is affected"</i>. Your
        refresh plan is still safe; it may just be wider than it strictly needs to be.</p>
 
-    <h3>Refresh these first</h3>
-    <p>Rebuilding an incremental re-reads its parents from scratch &mdash; so your rebuild is only as
-       complete as the history those parents hold. If an ancestor is <i>also</i> incremental, it may
-       not have the full history, so refresh it first. They're numbered in the order to do it.</p>
+    <h3>The drop list</h3>
+    <p>Impact answers one question: <i>"the work is done &mdash; which models do I drop now?"</i> It lists
+       every <b>incremental</b> on the change's lineage &mdash; <b>upstream</b> (feeds it), the
+       <b>target</b>, and <b>downstream</b> (reads it) &mdash; in the order to drop them. A dropped
+       incremental is rebuilt in full by the next scheduled run; views and tables rebuild for free and
+       aren't listed. Drop the ones you changed, or whose stored history you don't trust.</p>
+    <p>With <b>additive</b> on, an append/sync incremental that only needs the new column <i>added</i>
+       moves to its own bucket (its next normal run adds it) &mdash; but existing rows get NULL, so
+       full-refresh it anyway if you need the history backfilled.</p>
 
     <h3>The other controls</h3>
     <dl>
@@ -410,7 +441,8 @@ ul.cols em{font-style:normal;color:var(--accent)}
           Leave empty to mean "I'm changing the whole model". Pick several to ask "what breaks if I
           change <i>any</i> of these".</dd>
       <dt>Direction</dt>
-      <dd>Which way to walk. Impact forces downstream &mdash; a change can't affect what feeds it.</dd>
+      <dd>Which way to walk from the model. In Impact it filters the drop list to upstream, downstream,
+          or both.</dd>
       <dt>Show</dt>
       <dd>Filter the graph to one materialization, e.g. incrementals only to see just the
           expensive part.</dd>
@@ -418,28 +450,79 @@ ul.cols em{font-style:normal;color:var(--accent)}
 
     <h3>Reading the graph</h3>
     <p>The crimson <b>TARGET</b> box is the model you're changing; the light-blue
-       <b>INSPECTING</b> ring marks the node whose SQL is open in the Detail pane. Click any node
-       to inspect it; <b>Ctrl+click</b> (or double-click) to make it the target. Node colours mean
+       <b>INSPECTING</b> ring marks the node whose SQL is open in the Detail pane. In Impact,
+       an amber <b>DROP</b> tag marks every node on the drop list. Click any node to inspect it
+       &mdash; its <b>direct arrows light up</b> (what feeds it, what it feeds) so the local wiring
+       reads at a glance; <b>Ctrl+click</b> (or double-click) makes it the target. Node colours mean
        materialization &mdash; see the legend in the graph's top-right corner. Scroll to zoom, drag
        to pan, and drag the pane edges to resize.</p>
+
+    <h3>The Detail pane, two halves</h3>
+    <p>The red <b>TARGET DETAIL</b> section always answers about the model you picked &mdash; the
+       drop list, the plan, a column's trace. The blue <b>INSPECTING</b> section below it shows the
+       SQL of whatever node you last clicked, with the lines that <i>produce</i> the relevant columns
+       highlighted (solid = proven, hatched = unproven). Click around the graph and only the
+       INSPECTING half changes; the plan stays put.</p>
     <p class="q">A model whose SQL couldn't be fully analyzed is included conservatively and marked
        &mdash; it's never assumed safe.</p>
   </div>
 </div>
 
 <div class="body" id="body">
-  <aside class="pane tree">
+  <aside class="pane rail-pane">
     <div class="splitter" id="splitTree" title="Drag to resize"></div>
-    <div class="pane-head"><h2>Models</h2>
-      <button class="collapse" id="hideTree" title="Collapse">&#10094;</button></div>
-    <div style="padding:.4rem .6rem 0"><input type="search" id="treeSearch" placeholder="filter models…" style="width:100%"></div>
-    <div class="pane-body" id="treeBody"></div>
+    <div class="rail">
+      <div class="ctl">
+        <label for="modelPick">Model</label>
+        <select id="modelPick" data-tip="The model you're changing. Everything else follows from this."></select>
+      </div>
+      <div class="ctl">
+        <label>Mode</label>
+        <div class="seg vert" id="modeSeg">
+          <button data-mode="lineage" aria-pressed="true" data-tip="What this model reads from and what reads it.">Lineage</button>
+          <button data-mode="impact" aria-pressed="false" data-tip="If I change this, what might need a full refresh?">Impact</button>
+          <button data-mode="columns" aria-pressed="false" data-tip="Where a column comes from and what derives from it.">Columns</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <label for="dirPick">Direction</label>
+        <select id="dirPick" data-tip="Which way to walk from the model. In Impact it filters the drop list to upstream, the target, downstream, or all.">
+          <option value="both">both</option><option value="down">downstream</option><option value="up">upstream</option>
+        </select>
+      </div>
+      <label class="switch" data-tip="Only ADDING columns? Incrementals set to append_new_columns or sync_all_columns absorb additive changes without a full refresh. Renames, drops and type changes never do.">
+        <input type="checkbox" id="additive"> additive change
+      </label>
+    </div>
+    <div class="tree-section" id="treeSection">
+      <div class="pane-head clickable" id="treeHead" title="Collapse the model list"><h2>Models</h2>
+        <button class="collapse" id="hideTree" title="Collapse" tabindex="-1">&#10094;</button></div>
+      <div class="tree-filter"><input type="search" id="treeSearch" placeholder="filter models…" style="width:100%"></div>
+      <div class="pane-body" id="treeBody"></div>
+    </div>
   </aside>
 
   <main class="pane graph">
-    <div id="graph"></div>
-    <div id="legend" hidden></div>
-    <div class="graph-note" id="graphNote"></div>
+    <div class="graph-toolbar">
+      <div class="ctl gb-cols">
+        <label for="colBtn">Columns</label>
+        <button id="colBtn" class="colbtn" data-tip="Narrow to specific columns &mdash; the result is everything affected by ANY of them. Opens a picker: click a column on the left to add it, click one on the right to remove it. Leave empty to treat it as a whole-model change.">+ add columns</button>
+        <span id="colHint" class="info" hidden>i</span>
+        <span class="chips" id="colChips"></span>
+      </div>
+      <div class="ctl gb-show">
+        <label for="matPick">Show</label>
+        <select id="matPick" data-tip="Filter the graph by materialization: how dbt persists a model. view = recomputed on query; table = rebuilt every run; incremental = only new rows added, so these need a full refresh when logic changes.">
+          <option value="">all types</option><option value="incremental">incremental only</option>
+          <option value="table">table only</option><option value="view">view only</option>
+        </select>
+      </div>
+    </div>
+    <div class="graph-area">
+      <div id="graph"></div>
+      <div id="legend" hidden></div>
+      <div class="graph-note" id="graphNote"></div>
+    </div>
   </main>
 
   <aside class="pane detail">
@@ -447,13 +530,18 @@ ul.cols em{font-style:normal;color:var(--accent)}
     <div class="pane-head clickable" id="detailHead" title="Collapse detail panel"><h2>Detail</h2>
       <button class="collapse" id="hideDetail" title="Collapse" tabindex="-1">&#10095;</button></div>
     <div class="pane-body">
-      <div id="results"></div>
-      <div id="sqlPanel"></div>
+      <section class="det-sec det-target">
+        <div class="det-shead"><span class="det-badge">TARGET DETAIL</span><span id="targetName"></span></div>
+        <div id="results"></div>
+      </section>
+      <section class="det-sec det-inspect" id="inspectSec">
+        <div class="det-shead"><span class="det-badge">INSPECTING</span><span id="inspectName"></span></div>
+        <div id="sqlPanel"></div>
+      </section>
     </div>
   </aside>
 </div>
 
-<button id="showTree" title="Show models">&#10095;</button>
 <button id="showDetail" title="Show detail">&#10094;</button>
 
 <script>__MERMAID__</script>
@@ -489,6 +577,18 @@ function topoOrder(set){
   for (const u of Array.from(set).sort()) visit(u);
   return out;
 }
+/* Does a column with these edges read a tainted (parent,col)? A genuine unknown
+   leaf (parent null AND no external relation) fails closed; an external terminal
+   (parent null but a real off-project relation) never carries an in-project change. */
+function colReadsChange(edges, tainted){
+  for (const e of (edges || [])){
+    const p = e[0], pc = e[1], rel = e[3];
+    if (p === null && (rel === null || rel === undefined)) return true;  // unknown -> fail closed
+    if (p === null) continue;                                            // external terminal
+    if (tainted.has(key(p,pc)) || tainted.has(key(p,"*"))) return true;
+  }
+  return false;
+}
 /* union taint from one or more changed columns; fail-closed on unknown lineage */
 function taint(root, cols){
   const down = walk(root, "down");
@@ -501,47 +601,84 @@ function taint(root, cols){
       unknown.add(uid); affected.add(uid); tainted.add(key(uid,"*")); continue;
     }
     let modelHit = false;
-    for (const col in info.cols){
-      let hit = false;                       // per COLUMN, not per model
-      for (const [p,pc,_t] of info.cols[col]){
-        if (p === null) hit = true;
-        else if (tainted.has(key(p,pc))) hit = true;
-        else if (tainted.has(key(p,"*"))) hit = true;
+    for (const col in info.cols){        // explicit columns (all, or computed additions)
+      if (colReadsChange(info.cols[col], tainted)){
+        tainted.add(key(uid,col)); (byNode[uid] = byNode[uid]||new Set()).add(col); modelHit = true;
       }
-      if (hit){ tainted.add(key(uid,col)); (byNode[uid] = byNode[uid]||new Set()).add(col); modelHit = true; }
+    }
+    if (info.passthrough && info.passthrough.parent){
+      // every non-computed column passes through by name: inherit the terminal's
+      // tainted columns (snapshot the set first; we mutate it in the loop)
+      const src = info.passthrough.parent;
+      for (const t of Array.from(tainted)){
+        const i = t.indexOf("|"), u = t.slice(0,i), c = t.slice(i+1);
+        if (u === src && !(c in info.cols)){
+          tainted.add(key(uid,c)); (byNode[uid] = byNode[uid]||new Set()).add(c); modelHit = true;
+        }
+      }
     }
     if (modelHit) affected.add(uid);
   }
   return {affected, unknown, byNode};
 }
-function classify(uids, additive){
-  const full = [], rebuild = [];
+/* target+downstream models -> full-refresh / absorbs (additive) / rebuild-free */
+function classifyDownstream(uids, additive){
+  const full = [], absorbs = [], rebuild = [];
   for (const uid of topoOrder(new Set(uids))){
     const n = N[uid];
     if (!n || n.mat !== "incremental") rebuild.push(uid);
-    else if (additive && SAFE_OSC.has(n.osc || "ignore")) rebuild.push(uid);
+    else if (additive && SAFE_OSC.has(n.osc || "ignore")) absorbs.push(uid);
     else full.push(uid);
   }
-  return {full, rebuild};
+  return {full, absorbs, rebuild};
 }
-/* incremental ancestors gate a rebuild's history &mdash; refresh these first, in order */
-function upstreamPrereqs(root){
-  const anc = Object.keys(walk(root,"up")).filter(u => N[u] && N[u].mat === "incremental");
-  return topoOrder(new Set(anc));
+/* incremental ancestors on the columns' lineage (topo order). No columns -> every
+   incremental ancestor. Fails closed: past an opaque model, keep all above it. */
+function upstreamIncrementals(root, cols){
+  if (!cols || !cols.length){
+    const anc = Object.keys(walk(root,"up")).filter(u => N[u] && N[u].mat === "incremental");
+    return topoOrder(new Set(anc));
+  }
+  const lineage = new Set(), opaque = new Set();
+  for (const c of cols) for (const e of colUpstream(root, c)){
+    if (e.parent) lineage.add(e.parent);
+    else if (e.t === "unknown") opaque.add(e.uid);
+  }
+  for (const m of opaque) for (const a of Object.keys(walk(m,"up"))) lineage.add(a);
+  lineage.delete(root);
+  const incs = Array.from(lineage).filter(u => N[u] && N[u].mat === "incremental");
+  return topoOrder(new Set(incs));
 }
-function ddlFor(uids){
-  return uids.map(u => ({
-    statement: "DROP TABLE " + N[u].relation + " CASCADE;",
-    views: Object.keys(walk(u,"down")).filter(d => N[d] && N[d].mat === "view").sort()
+function relSchemaTable(uid){ return (N[uid] && N[uid].rel_st) || N[uid].relation; }
+/* merge upstream + target + downstream incrementals into ONE topo-ordered drop
+   list, tagged by position, with db-less DROP DDL + the views a CASCADE removes */
+function dropList(upstreamIncs, fullRefresh, root){
+  const pos = {}; for (const u of upstreamIncs) pos[u] = "upstream";
+  for (const u of fullRefresh) pos[u] = (u === root ? "target" : "downstream");
+  return topoOrder(new Set(Object.keys(pos))).map(uid => ({
+    model: uid, name: N[uid].name, position: pos[uid], relation: relSchemaTable(uid),
+    statement: "DROP TABLE " + relSchemaTable(uid) + " CASCADE;",
+    views: Object.keys(walk(uid,"down")).filter(d => N[d] && N[d].mat === "view").sort(),
   }));
 }
 function colUpstream(uid, col, depth, seen, out){
   seen = seen || new Set(); out = out || []; depth = depth || 1;
   const info = COLS[uid];
-  if (!info || !info.resolved){ out.push({uid, col, parent:null, pcol:null, t:"unknown", d:depth}); return out; }
-  for (const [p,pc,t] of (info.cols[col]||[])){
-    const k = key(uid,col)+key(p,pc); if (seen.has(k)) continue; seen.add(k);
-    out.push({uid, col, parent:p, pcol:pc, t, d:depth});
+  if (!info){
+    // a non-model node (source/seed/snapshot) is a resolved leaf with no lineage
+    // — exactly Python's columns_of; only a missing/unresolved MODEL is unknown
+    if (N[uid] && N[uid].type !== "model") return out;
+    out.push({uid, col, parent:null, pcol:null, rel:null, t:"unknown", d:depth}); return out;
+  }
+  if (!info.resolved){ out.push({uid, col, parent:null, pcol:null, rel:null, t:"unknown", d:depth}); return out; }
+  let edges = info.cols[col];
+  if (!edges && info.passthrough){  // passes through by name to the terminal
+    const pt = info.passthrough;    // rel only when the terminal is external (no parent)
+    edges = [[pt.parent, col, "passthrough", pt.parent ? null : pt.rel]];
+  }
+  for (const [p,pc,t,rel] of (edges || [])){
+    const k = key(uid,col) + key(p,pc) + (rel||""); if (seen.has(k)) continue; seen.add(k);
+    out.push({uid, col, parent:p, pcol:pc, rel: rel||null, t, d:depth});
     if (p && pc) colUpstream(p, pc, depth+1, seen, out);
   }
   return out;
@@ -587,16 +724,19 @@ function unprovenCols(uid){
     return out;
   }
   for (const c in info.cols)
-    if ((info.cols[c] || []).some(e => e[0] === null)) out.add(c);
+    // a genuine unknown leaf is parent null AND no external relation; an external
+    // terminal (e[3] set) is PROVEN, just off-project
+    if ((info.cols[c] || []).some(e => e[0] === null && (e[3] == null))) out.add(c);
   return out;
 }
-window.__api = {walk, topoOrder, taint, classify, upstreamPrereqs, hlRegex, hlLines, unprovenCols};   // used by the parity test
+window.__api = {walk, topoOrder, taint, colUpstream, classifyDownstream,
+                upstreamIncrementals, dropList, hlRegex, hlLines, unprovenCols};   // used by the parity test
 
 /* ---------------- state ---------------- */
 /* each mode has a natural direction: lineage/columns look both ways, impact only
    downstream (a change can't affect what feeds it). Switching modes RESTORES the
    new mode's default, so you can always get back to the view you started with. */
-const MODE_DIR = {lineage:"both", impact:"down", columns:"both"};
+const MODE_DIR = {lineage:"both", impact:"both", columns:"both"};
 const S = {model:null, cols:[], mode:"lineage", dir:MODE_DIR.lineage, additive:false, mat:"",
            detail:null, sqlMode:"compiled"};
 const $ = id => document.getElementById(id);
@@ -836,13 +976,15 @@ const SVGNS = "http://www.w3.org/2000/svg";
 /* role badge straddling a node's top border, as an SVG foreignObject so it
    renders styled HTML text yet still pans/zooms with the graph. dx offsets a
    second badge so TARGET + INSPECTING can sit side by side. Returns its width. */
-function svgBadge(g, cls, txt, bg, fg, dx){
+function svgBadge(g, cls, txt, bg, fg, dx, align){
   const shape = g.querySelector("rect"); if (!shape) return 0;
   const x = parseFloat(shape.getAttribute("x")), y = parseFloat(shape.getAttribute("y"));
+  const sw = parseFloat(shape.getAttribute("width")) || 0;
   const w = txt.length * 7.3 + 16;
   const fo = document.createElementNS(SVGNS, "foreignObject");
   fo.setAttribute("class", "rolebadge " + cls);
-  fo.setAttribute("x", x + 10 + (dx || 0)); fo.setAttribute("y", y - 9);
+  const px = align === "right" ? x + sw - w - 10 - (dx || 0) : x + 10 + (dx || 0);
+  fo.setAttribute("x", px); fo.setAttribute("y", y - 9);
   fo.setAttribute("width", w + 4); fo.setAttribute("height", 18);
   fo.setAttribute("overflow", "visible");
   const div = document.createElement("div");
@@ -879,6 +1021,10 @@ async function drawGraph(nodes, root, annot){
     tip.textContent = "click: inspect in Detail  |  Ctrl+click: make this the target";
     g.appendChild(tip);
     if (SID[m[1]] === root) svgBadge(g, "rb-target", "TARGET", p.changed, "#fff");
+    // mark drop-list members (not the target, which already carries TARGET) so the
+    // graph matches the plan: an amber DROP tag at the node's top-right
+    else if (window.__dropNodes && window.__dropNodes.has(SID[m[1]]))
+      svgBadge(g, "rb-drop", "DROP", "#c47d2b", "#fff", 0, "right");
     g.addEventListener("click", e => {
       if (e.ctrlKey || e.metaKey){ selectModel(SID[m[1]]); return; }
       S.detail = SID[m[1]]; renderDetail(); markSelected();
@@ -943,6 +1089,33 @@ function markSelected(){
       g.appendChild(hint);
     }
   });
+  markInspectEdges();
+}
+/* emphasize the arrows immediately touching the inspected node -- its direct
+   parents (what feeds it) and direct children (what it feeds) -- so a click
+   reads locally in the graph, not just in the Detail pane. mermaid names each
+   edge `L_<fromSid>_<toSid>_<globalIndex>`; we strip that trailing index and
+   match the from/to key against the node's PAR/CH. Edges to nodes not in the
+   current graph simply aren't present. */
+function markInspectEdges(){
+  document.querySelectorAll("#graph .edge-inspect").forEach(e => {
+    e.classList.remove("edge-inspect");
+    e.style.removeProperty("stroke"); e.style.removeProperty("stroke-width");
+    e.style.removeProperty("opacity");
+  });
+  const uid = S.detail; if (!uid) return;
+  const p = palette();
+  const targets = new Set();
+  for (const par of (PAR[uid] || [])) targets.add(sid(par) + "_" + sid(uid));  // feeds it
+  for (const ch of (CH[uid] || [])) targets.add(sid(uid) + "_" + sid(ch));      // it feeds
+  if (!targets.size) return;
+  document.querySelectorAll('#graph svg [id^="L_"]').forEach(e => {
+    if (!targets.has(e.id.replace(/^L_/, "").replace(/_\d+$/, ""))) return;
+    e.classList.add("edge-inspect");
+    e.style.setProperty("stroke", p.inspect, "important");
+    e.style.setProperty("stroke-width", "2.6px", "important");
+    e.style.setProperty("opacity", "1", "important");
+  });
 }
 function applyPan(){
   const el = document.querySelector("#graph svg");
@@ -962,68 +1135,76 @@ function renderResults(res){
   }
   let h = "";
   if (S.mode === "impact"){
-    const {full, rebuild} = res.plan;
-    h += '<div class="summary">' + (S.cols.length
-        ? "<b>" + res.affectedCount + "</b> of " + res.downCount + " downstream models read " +
-          S.cols.map(c => "<code>" + esc(c) + "</code>").join(", ")
-        : "<b>" + res.downCount + "</b> downstream models are affected.") + "</div>";
+    if (S.cols.length) h += '<div class="summary"><b>' + res.affectedCount + "</b> of " +
+      res.downCount + " downstream models read " +
+      S.cols.map(c => "<code>" + esc(c) + "</code>").join(", ") + "</div>";
     if (res.unknownCount) h += '<div class="summary" style="color:var(--muted)">' + res.unknownCount +
       ' included conservatively &mdash; lineage unresolved. <span class="info" data-tip="This model\'s SQL couldn\'t be fully analyzed (select * over a join, dynamic macros, a Python model). It is never assumed safe.">i</span></div>';
-    const pre = upstreamPrereqs(S.model);
-    if (pre.length){
-      h += '<div class="section-label">Refresh these first (' + pre.length + ') <span class="info" ' +
-        'data-tip="Rebuilding re-reads the parents from scratch, so it is only as complete as the history these incremental ancestors hold. Verify or refresh them first, in this order.">i</span></div>';
-      h += pre.map((u,i) => '<div class="row" data-uid="' + u + '"><span class="pill warn">' +
-             (i+1) + '</span>' + esc(N[u].name) + "</div>").join("");
+    // the merged DROP list, filtered by the direction toggle
+    const drop = res.dropAll.filter(e =>
+      res.dir === "both" ? true : res.dir === "up" ? e.position !== "downstream"
+                                                   : e.position !== "upstream");
+    h += '<div class="section-label">Drop these (' + drop.length + ') <span class="info" ' +
+      'data-tip="Every incremental on this change\'s lineage &mdash; upstream, the target, and downstream. A dropped incremental is rebuilt in full by the next scheduled run. Drop the ones you changed, or whose stored history you don\'t trust.">i</span></div>';
+    if (!drop.length){
+      h += '<div class="empty" style="padding:.2rem">Nothing to drop &mdash; nothing on this path is incremental.</div>';
+    } else {
+      h += drop.map(e =>
+        '<div class="row" data-uid="' + e.model + '"><span class="pill pos-' + e.position + '">' +
+          e.position + '</span>' + esc(e.name) + "</div>" +
+        '<pre class="cmd">' + esc(e.statement) +
+        (e.views.length ? "\n-- CASCADE also drops views: " + e.views.map(v => N[v].name).join(", ") : "") +
+        "</pre>").join("");
     }
-    h += '<div class="section-label">Needs full refresh (' + full.length + ')</div>';
-    h += full.length ? full.map(u => nameRow(u,"drop","warn")).join("")
-                     : '<div class="empty" style="padding:.2rem">None &mdash; nothing downstream is incremental.</div>';
-    h += '<div class="section-label">Rebuild normally (' + rebuild.length + ')</div>';
-    h += rebuild.length ? rebuild.map(u => nameRow(u,"run","ok")).join("") : '<div class="empty" style="padding:.2rem">None.</div>';
+    if (res.absorbs.length){
+      h += '<div class="section-label">Absorbs schema change (' + res.absorbs.length + ') <span class="info" ' +
+        'data-tip="With additive on, an append/sync incremental adds the column on its next normal run; existing rows get NULL. Full-refresh it anyway if you need the history backfilled.">i</span></div>';
+      h += res.absorbs.map(u => '<div class="row" data-uid="' + u + '"><span class="pill">absorbs</span>' +
+        esc(N[u].name) + ' <span style="color:var(--muted)">[' + esc(N[u].osc || "ignore") + "]</span></div>").join("");
+    }
+    h += '<div class="section-label">Rebuild normally (' + res.rebuild.length + ')</div>';
+    h += res.rebuild.length ? res.rebuild.map(u => nameRow(u,"run","ok")).join("")
+                            : '<div class="empty" style="padding:.2rem">None.</div>';
     const tests = new Set();
     for (const u of res.affected) for (const t of (DATA.tests[u]||[])) tests.add(t);
     if (tests.size) h += '<div class="section-label">Tests that re-run</div><div class="summary">' + tests.size + "</div>";
-    h += '<div class="section-label">Commands</div>';
-    if (full.length) h += '<pre class="cmd">dbt run --select ' + full.map(u => N[u].name).join(" ") + " --full-refresh</pre>";
+    h += '<div class="section-label">Or rebuild with dbt <span class="info" data-tip="The safe alternative to dropping: an atomic swap, but it needs ~2x storage during the rebuild.">i</span></div>';
+    if (drop.length) h += '<pre class="cmd">dbt run --select ' + drop.map(e => e.name).join(" ") + " --full-refresh</pre>";
     h += '<pre class="cmd">dbt build --select ' + N[S.model].name + "+</pre>";
-    const ddl = ddlFor(full);
-    if (ddl.length){
-      h += '<div class="section-label">Or drop first <span class="info" data-tip="Frees disk before the rebuild &mdash; useful when a table is too big to hold two copies. The table is gone until rebuilt, and CASCADE also drops dependent views.">i</span></div>';
-      h += ddl.map(d => '<pre class="cmd">' + esc(d.statement) +
-        (d.views.length ? "\n-- also drops views: " + d.views.map(v => N[v].name).join(", ") : "") + "</pre>").join("");
-    }
   } else if (S.mode === "columns"){
     if (!S.cols.length){
       h += '<div class="empty"><b>Add a column</b> above to trace where it comes from and what derives from it.</div>';
     } else {
+      // one collapsible group per selected column (COMES FROM + DERIVED together).
+      // Default collapsed at 2+ columns to keep a dense multi-select scannable.
       for (const c of S.cols){
-        h += '<div class="section-label">' + esc(c) + " &mdash; comes from</div>";
         const up = colUpstream(S.model, c);
-        h += up.length ? up.map(e => '<div class="row">' + "&nbsp;".repeat((e.d-1)*2) +
-              (e.parent ? esc(N[e.parent] ? N[e.parent].name : e.parent) + "." + esc(e.pcol) +
-                ' <span class="pill ok">' + esc(e.t) + "</span>"
-                        : '<span class="pill unknown">lineage unknown</span>') + "</div>").join("")
-                      : '<div class="empty" style="padding:.2rem">No upstream columns (literal or count(*)).</div>';
-      }
-      // downstream, grouped by which selected (source) column each derives from;
-      // untraceable (unproven) downstream columns are flagged, never hidden
-      h += '<div class="section-label">Derived downstream (by source column)</div>';
-      for (const c of S.cols){
-        h += '<div class="summary" style="margin:.35rem 0 .1rem"><b>' + esc(c) + "</b> feeds:</div>";
-        const rows = [];
-        for (const u of Object.keys((res.byCol && res.byCol[c]) || {})){
-          const unp = unprovenCols(u), cols = res.byCol[c][u];
-          const shown = cols.map(x => unp.has(x) ? esc(x) + "?" : esc(x)).join(", ");
-          rows.push('<div class="row" data-uid="' + u + '">' +
-            "&nbsp;&nbsp;" + esc(N[u].name) + "." +
-            '<span style="color:var(--accent)">' + shown + "</span>" +
-            (cols.every(x => unp.has(x)) ? ' <span class="pill unknown">unproven</span>' : "") + "</div>");
+        const downNodes = Object.keys((res.byCol && res.byCol[c]) || {});
+        const open = colGroupState(c);
+        h += '<div class="colgroup"><div class="colgroup-head" data-col="' + esc(c) + '">' +
+          '<span class="chev">' + (open ? "&#9662;" : "&#9656;") + "</span><b>" + esc(c) + "</b>" +
+          '<span class="colgroup-sub">' + up.length + " upstream &middot; " + downNodes.length + " downstream</span></div>";
+        if (open){
+          h += '<div class="colgroup-body"><div class="section-label">comes from</div>';
+          h += up.length ? up.map(e => '<div class="row"' +
+                (e.parent ? ' data-uid="' + e.parent + '"' : "") + ">" + "&nbsp;".repeat((e.d-1)*2) +
+                (e.parent ? esc(N[e.parent] ? N[e.parent].name : e.parent) + "." + esc(e.pcol) +
+                  ' <span class="pill ok">' + esc(e.t) + "</span>"
+                          : e.rel ? esc(e.rel) + "." + esc(e.pcol) + ' <span class="pill">external</span>'
+                                  : '<span class="pill unknown">lineage unknown</span>') + "</div>").join("")
+                        : '<div class="empty" style="padding:.2rem">No upstream columns (literal or count(*)).</div>';
+          h += '<div class="section-label">feeds downstream</div>';
+          const rows = downNodes.map(u => {
+            const unp = unprovenCols(u), cols = res.byCol[c][u];
+            const shown = cols.map(x => unp.has(x) ? esc(x) + "?" : esc(x)).join(", ");
+            return '<div class="row" data-uid="' + u + '">&nbsp;&nbsp;' + esc(N[u].name) + "." +
+              '<span style="color:var(--accent)">' + shown + "</span>" +
+              (cols.every(x => unp.has(x)) ? ' <span class="pill unknown">unproven</span>' : "") + "</div>";
+          });
+          h += (rows.length ? rows.join("") : '<div class="empty" style="padding:.1rem .6rem">nothing downstream</div>') + "</div>";
         }
-        h += rows.length ? rows.join("")
-          : '<div class="empty" style="padding:.1rem .6rem">nothing downstream</div>';
+        h += "</div>";
       }
-
     }
   } else {
     const up = Object.keys(walk(S.model,"up")).length, down = Object.keys(walk(S.model,"down")).length;
@@ -1039,16 +1220,22 @@ function renderResults(res){
   box.innerHTML = h;
   box.querySelectorAll(".row[data-uid]").forEach(r =>
     r.onclick = () => { S.detail = r.dataset.uid; renderDetail(); markSelected(); });
+  // toggling a column group just re-renders the pane (no graph recompute)
+  box.querySelectorAll(".colgroup-head").forEach(el =>
+    el.onclick = () => { toggleColGroup(el.dataset.col); renderResults(res); });
 }
-/* the Detail header echoes the INSPECTING badge + model name so the pane is
-   visibly tied to the highlighted node; lights up light-blue while inspecting */
+/* per-column expand state in Columns mode (session-scoped, not persisted):
+   default expanded for a single column, collapsed once several are selected */
+const colGroupOpen = {};
+function colGroupState(c){ return (c in colGroupOpen) ? colGroupOpen[c] : S.cols.length === 1; }
+function toggleColGroup(c){ colGroupOpen[c] = !colGroupState(c); }
+/* fill the two section headers: TARGET DETAIL echoes the picked model, INSPECTING
+   the clicked node (and its section glows blue while a node is actually inspected) */
 function updateDetailHead(){
+  $("targetName").textContent = S.model ? N[S.model].name : "—";
   const on = S.detail && N[S.detail];
-  $("detailHead").classList.toggle("inspecting", !!on);
-  document.querySelector("#detailHead h2").innerHTML = on
-    ? 'Detail &middot; <span class="insp-badge">INSPECTING</span> ' +
-      '<span class="insp-name">' + esc(N[S.detail].name) + "</span>"
-    : "Detail";
+  $("inspectSec").classList.toggle("on", !!on);
+  $("inspectName").textContent = on ? N[S.detail].name : "—";
 }
 function renderDetail(){
   updateDetailHead();
@@ -1060,7 +1247,12 @@ function renderDetail(){
     return;
   }
   const cur = window.__last || {};
-  const related = (cur.byNode && cur.byNode[S.detail]) ? Array.from(cur.byNode[S.detail]).sort() : [];
+  // highlight the inspected node's relevant columns: downstream nodes -> the
+  // affected columns (byNode); upstream nodes -> the columns that FEED the
+  // selection (upMap). Either way, the lines that PRODUCE those columns light up.
+  const downRel = (cur.byNode && cur.byNode[S.detail]) ? Array.from(cur.byNode[S.detail]) : [];
+  const upRel = (cur.upMap && cur.upMap[S.detail]) ? Object.keys(cur.upMap[S.detail]) : [];
+  const related = Array.from(new Set(downRel.concat(upRel))).sort();
   const sql = SQL[S.detail][S.sqlMode] || "";
   // split proven from fail-closed so the two never look alike
   const unproven = unprovenCols(S.detail);
@@ -1116,14 +1308,14 @@ async function run(){
     await drawGraph(null); renderResults({}); renderDetail(); $("graphNote").textContent = "";
     return;
   }
-  const dir = S.mode === "impact" ? "down" : S.dir;
+  const dir = S.dir;   // impact now respects direction too (defaults to both)
   let nodes = new Set([S.model]), byNode = null, annot = null, res = {};
-  if (S.mode === "impact" || (S.mode === "columns" && S.cols.length)){
-    const down = walk(S.model,"down");
-    const downModels = Object.keys(down).filter(u => N[u] && N[u].type === "model");
+  const taintMode = S.mode === "impact" || (S.mode === "columns" && S.cols.length);
+  if (taintMode){
+    const downModels = Object.keys(walk(S.model,"down")).filter(u => N[u] && N[u].type === "model");
+    res.downCount = downModels.length;
     if (S.cols.length){
       const t = taint(S.model, S.cols);
-      t.affected.forEach(u => nodes.add(u));
       byNode = t.byNode; res.affected = Array.from(t.affected);
       res.unknownCount = t.unknown.size; res.affectedCount = t.affected.size; res.byNode = t.byNode;
       // per-selected-column maps: which downstream cols each selected col reaches,
@@ -1147,24 +1339,36 @@ async function run(){
       res.byCol = byCol; res.upMap = upMap;
       annot = {downMap, upMap, selected: S.cols.slice()};
     } else {
-      downModels.forEach(u => nodes.add(u));
       res.affected = downModels; res.affectedCount = downModels.length; res.unknownCount = 0; res.byNode = {};
     }
-    res.downCount = downModels.length;
-    if (S.mode === "columns")
-      for (const e of S.cols.flatMap(c => colUpstream(S.model,c))) if (e.parent) nodes.add(e.parent);
-    // include the changed model itself: if it's incremental, a plain run only
-    // appends, so its existing rows keep the old logic
+    // the plan (merged drop list + absorbs + free rebuilds) is always computed in
+    // FULL; direction filters what's shown, not what's planned. The changed model
+    // itself is in the plan: an incremental's plain run only appends old-logic rows.
     const planSet = new Set(res.affected);
     if (N[S.model] && N[S.model].type === "model") planSet.add(S.model);
-    res.plan = classify(Array.from(planSet), S.additive);
+    const cd = classifyDownstream(Array.from(planSet), S.additive);
+    res.dropAll = dropList(upstreamIncrementals(S.model, S.cols), cd.full, S.model);
+    res.absorbs = cd.absorbs; res.rebuild = cd.rebuild;
+    // display nodes, filtered by direction
+    if (dir === "down" || dir === "both") res.affected.forEach(u => nodes.add(u));
+    if (dir === "up" || dir === "both"){
+      if (S.cols.length){
+        for (const c of S.cols) for (const e of colUpstream(S.model,c)) if (e.parent) nodes.add(e.parent);
+      } else {
+        Object.keys(walk(S.model,"up")).forEach(u => nodes.add(u));
+      }
+    }
   } else {
     if (dir === "up" || dir === "both") Object.keys(walk(S.model,"up")).forEach(u => nodes.add(u));
     if (dir === "down" || dir === "both") Object.keys(walk(S.model,"down")).forEach(u => nodes.add(u));
     res.affected = [];
   }
+  res.dir = dir;
   if (S.mat) nodes = new Set(Array.from(nodes).filter(u => u === S.model || N[u].mat === S.mat));
-  window.__last = {byNode};
+  window.__last = {byNode, upMap: res.upMap || null};
+  // graph badges: which rendered nodes are on the drop list (impact only)
+  window.__dropNodes = (S.mode === "impact" && res.dropAll)
+    ? new Set(res.dropAll.map(e => e.model)) : null;
   await drawGraph(nodes, S.model, annot);
   renderResults(res); renderDetail();
   $("graphNote").innerHTML =
@@ -1194,6 +1398,7 @@ function buildLegend(){
       '<div class="lg-sep"></div>' +
       ol(p.changed, "<b>target</b> &mdash; the model you picked") +
       ol(p.inspect, "<b>inspecting</b> &mdash; open in Detail &rarr;") +
+      sw("#c47d2b", "<b>drop</b> &mdash; on the impact drop list") +
       '<div class="lg-hint">Ctrl+click a node to make it the target</div></div>';
     el.querySelector(".lg-toggle").onclick = () => {
       legendOpen = false; try { localStorage.setItem("dw-legend", "closed"); } catch (_) {}
@@ -1248,8 +1453,8 @@ document.addEventListener("keydown", e => {
   else if (e.key === "?" && helpBox.hidden && e.target === document.body) openHelp();
 });
 
-$("hideTree").onclick = () => { $("body").classList.add("no-tree"); $("showTree").style.display = "flex"; };
-$("showTree").onclick = () => { $("body").classList.remove("no-tree"); $("showTree").style.display = "none"; };
+// the Models header folds/unfolds the list (the rail above it stays put)
+$("treeHead").onclick = () => $("body").classList.toggle("no-tree");
 // the whole Detail header collapses the pane (the chevron just bubbles up to it)
 $("detailHead").onclick = () => { $("body").classList.add("no-detail"); $("showDetail").style.display = "flex"; };
 $("showDetail").onclick = () => { $("body").classList.remove("no-detail"); $("showDetail").style.display = "none"; };

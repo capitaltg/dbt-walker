@@ -80,6 +80,19 @@ def test_topo_order(graph):
     assert order == ["model.p.a", "model.p.b", "model.p.c"]
 
 
+def test_relation_schema_table_strips_database():
+    g = Graph({"nodes": {"model.p.m": {"resource_type": "model", "database": "warehouse",
+                                       "schema": "analytics", "alias": "orders"}},
+               "parent_map": {}, "child_map": {}})
+    assert g.relation("model.p.m") == "warehouse.analytics.orders"
+    # DROP DDL uses schema.table only (Redshift/Postgres: no cross-db DDL)
+    assert g.relation_schema_table("model.p.m") == "analytics.orders"
+    # falls back to bare identifier when there is no schema
+    g2 = Graph({"nodes": {"model.p.m": {"resource_type": "model", "alias": "orders"}},
+                "parent_map": {}, "child_map": {}})
+    assert g2.relation_schema_table("model.p.m") == "orders"
+
+
 @pytest.mark.skipif(
     not (FIXTURE / "target" / "manifest.json").exists(),
     reason="fixture manifest not built — see CLAUDE.md",
@@ -94,9 +107,11 @@ def test_cli_against_jaffle_shop():
     result = json.loads(out.stdout)
     assert "model.jaffle_shop.orders" in result["full_refresh"]
     assert "model.jaffle_shop.customers" in result["rebuild"]
-    # every full-refresh model gets a DROP ... CASCADE statement (design D3)
-    ddl_models = {e["model"] for e in result["ddl"]}
-    assert ddl_models == set(result["full_refresh"])
-    orders_ddl = next(e for e in result["ddl"] if e["model"] == "model.jaffle_shop.orders")
-    assert orders_ddl["statement"].startswith("DROP TABLE ")
-    assert orders_ddl["statement"].endswith("CASCADE;")
+    # the merged drop list carries a DROP ... CASCADE per incremental (design D3),
+    # tagged by position, with the database qualifier stripped
+    drop = {e["model"]: e for e in result["drop_list"]}
+    assert set(drop) == set(result["full_refresh"])
+    orders = drop["model.jaffle_shop.orders"]
+    assert orders["position"] == "downstream"
+    assert orders["statement"].startswith("DROP TABLE ") and orders["statement"].endswith("CASCADE;")
+    assert orders["relation"] == "main.orders"  # db-less schema.table

@@ -199,5 +199,8 @@ def test_round_trip_impact_incremental_classification():
                     assert osc not in ("append_new_columns", "sync_all_columns"), (
                         f"{name} with osc={osc} should not need full refresh under --additive"
                     )
-        # every full_refresh entry must have a matching DDL statement
-        assert {e["model"] for e in result["ddl"]} == set(result["full_refresh"])
+        # the drop list's non-upstream (target+downstream) rows are exactly the
+        # full_refresh set, each carrying a DROP statement
+        target_down = {e["model"] for e in result["drop_list"] if e["position"] != "upstream"}
+        assert target_down == set(result["full_refresh"])
+        assert all(e["statement"].startswith("DROP TABLE ") for e in result["drop_list"])

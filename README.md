@@ -1,18 +1,22 @@
 # dbt-walker
 
-**Plan dbt full refreshes before you break something.** dbt incremental models
-only append on a normal run — change a model's logic and every downstream
-incremental still holds rows built with the *old* logic until someone
-full-refreshes it. dbt-walker reads dbt's own artifacts (never your warehouse)
-and answers, model-level and column-level: what feeds this, what reads it,
-which downstream incrementals need a `--full-refresh`, and exactly which
-commands (or `DROP ... CASCADE` DDL) to run.
+**"I changed a model (or one column) — which incrementals do I drop now?"**
+dbt incremental models only append on a normal run, so change the logic and
+every incremental on that path still holds rows built with the *old* logic
+until someone full-refreshes it. dbt-walker reads dbt's own artifacts (never
+your warehouse) and answers with **one ordered drop list**: every incremental
+on the change's lineage — upstream, the target, and downstream — with the exact
+`DROP ... CASCADE` DDL and dbt commands to run. Column-level, so changing one
+column usually touches far fewer models than the whole thing.
 
-![The lineage explorer in Impact mode: pick a target model, see which downstream models need a full refresh vs a normal rebuild, with the dbt commands and DROP DDL ready to copy.](https://raw.githubusercontent.com/Hugs401/dbt-walker/main/docs/img/app-impact.png)
+![The lineage explorer in Impact mode: changing one column in a model produces an ordered drop list of the incrementals on its lineage — upstream, target, and downstream — each with the DROP CASCADE DDL and dbt commands to copy.](https://raw.githubusercontent.com/Hugs401/dbt-walker/main/docs/img/app-impact.png)
 
-*The visual explorer in Impact mode — `stg_orders` is the target; the
-incremental `orders` model needs a full refresh, `customers` just rebuilds, and
-the refresh plan (dbt commands + `DROP ... CASCADE` DDL) is ready to copy.*
+*The visual explorer in Impact mode — changing `col_0` in `int_38`. The **drop
+list** names the incrementals on that column's lineage (`int_11`, `int_24`
+upstream; `int_38` the target), each tagged and marked with a DROP badge in the
+graph, with the `DROP TABLE ... CASCADE` DDL and dbt commands ready to copy.
+The graph traces `col_0` back through the chain; the SQL pane highlights the
+line that produces it.*
 
 ## Highlights
 
@@ -27,8 +31,12 @@ the refresh plan (dbt commands + `DROP ... CASCADE` DDL) is ready to copy.*
 - **Fails closed.** Lineage that can't be proven (`select *` over a join,
   dynamic macros, Python models) stays *in* the blast radius and is marked
   unproven — the tool never claims "safe" without proof.
+- **A merged, ordered drop list.** `impact` gives you one topologically-ordered
+  list of the incrementals to drop — upstream, target, and downstream — each
+  tagged and carrying its `DROP TABLE schema.table CASCADE;`. Under `--additive`,
+  incrementals that can just *add* the new column move to a separate bucket.
 - **A one-file visual explorer** (`build-app`): a self-contained HTML page with
-  the model tree, pan/zoom lineage graph, refresh plans, and SQL with the
+  the model tree, pan/zoom lineage graph, the drop-list plan, and SQL with the
   producing lines highlighted. Fully offline (mermaid is bundled, no CDN) —
   fine behind a corporate proxy, fine to email to a teammate.
 
@@ -46,7 +54,7 @@ Or as a standalone tool via [pipx](https://pipx.pypa.io/):
 
 ```bash
 python -m build --wheel                       # writes dist/dbt_walker-*.whl
-pipx install "dist/dbt_walker-0.3.1-py3-none-any.whl[col]"
+pipx install "dist/dbt_walker-0.4.0-py3-none-any.whl[col]"
 ```
 
 Requires Python 3.10+.
@@ -59,17 +67,21 @@ Run from inside a dbt project (anywhere with `target/manifest.json` — run
 ```bash
 dbt-walker upstream customers                    # what it reads from
 dbt-walker downstream stg_orders --mat incremental   # what reads it, filtered
-dbt-walker impact stg_orders                     # the refresh plan (see below)
-dbt-walker impact stg_orders --additive          # adding a column: incrementals with
-                                                 #   on_schema_change append/sync survive
+dbt-walker impact stg_orders                     # the drop list (see below)
+dbt-walker impact stg_orders --column status     # pruned to what reads `status`
+dbt-walker impact stg_orders --additive          # adding a column: append/sync
+                                                 #   incrementals move to "absorbs"
 ```
 
-`impact` splits the blast radius into *needs full refresh* vs *rebuilds
-normally*, lists upstream incremental prerequisites and the tests that re-run,
-and always prints **both** refresh paths: the safe dbt commands
-(`dbt run --select <models> --full-refresh`) and the explicit
-`DROP TABLE ... CASCADE;` DDL — with the downstream views each CASCADE would
-take out.
+`impact` prints one topologically-ordered **DROP THESE** list — every
+incremental on the change's lineage, tagged `upstream` / `target` /
+`downstream`, each with its `DROP TABLE schema.table CASCADE;` (and the
+downstream views a CASCADE would take out). Below it: what rebuilds for free,
+the tests that re-run, and the safe dbt alternative
+(`dbt run --select <models> --full-refresh` + `dbt build --select <model>+`).
+A dropped incremental is rebuilt in full by the next scheduled run. Add
+`--column <c>` to prune the whole thing — upstream and downstream — to just the
+lineage of that column (fails closed on lineage it can't resolve).
 
 ### Column-level
 
@@ -83,12 +95,20 @@ dbt-walker col-downstream stg_orders --column order_id   # what derives from it
 dbt-walker impact stg_orders --column status             # impact, pruned to readers of `status`
 ```
 
+A column that resolves to a real relation outside your dbt project (a cross-db
+table, an unmanaged source) is reported as an `[external]` terminal — a real
+answer, not a failure. And a `select *` staging/dedup chain
+(`select *, row_number() ... where rn = 1`) that bottoms out at one relation is
+traced **by name**, no inventory needed — so a column threaded through several
+`select *` layers still resolves offline. Genuinely ambiguous cases (a `select *`
+over a *join*) still fail closed.
+
 If `target/catalog.json` exists (from `dbt docs generate`), the column
-commands use its per-relation column inventories to resolve cases that are
-otherwise unprovable — unqualified columns across joins and `select *` over
-physical tables. It's per-relation and best-effort: a partial or missing
-catalog just means those relations resolve as before, and a stale catalog is a
-warning, never a hard stop. Reading it never touches the warehouse.
+commands additionally use its per-relation column inventories to resolve the
+harder cases — unqualified columns across joins. It's per-relation and
+best-effort: a partial or missing catalog just means those relations resolve as
+before, and a stale catalog is a warning, never a hard stop. Reading it never
+touches the warehouse.
 
 ### Graphs and diffs
 
@@ -119,13 +139,19 @@ Inside:
 
 - A searchable **model tree** and a pan/zoom **lineage graph**. Click a node to
   inspect it (SQL + details); Ctrl/Cmd-click to make it the **target**.
-- **Three modes:** Lineage, Impact (the refresh plan from the screenshot), and
-  Columns (pick columns, see both directions: what feeds them upstream and what
-  derives from them downstream). Selecting several columns shows everything
-  affected by *any* of them.
+- **Three modes:** Lineage, Impact (the drop list from the screenshot, with a
+  DROP badge on each listed node and a direction toggle that filters it to
+  upstream / downstream / both), and Columns (pick columns, each a collapsible
+  group tracing where it comes from and what derives from it). Selecting several
+  columns unions everything affected by *any* of them.
+- **A two-part Detail pane:** a red **TARGET DETAIL** half that stays fixed on
+  the model you picked (the plan / the column trace), over a blue **INSPECTING**
+  half that follows whatever node you click — its SQL, with the producing lines
+  highlighted.
 - **SQL highlighting** distinguishes *proven* derivations (solid) from
   *unproven* fail-closed ones (hatched), with exact line spans where sqlglot
-  can prove them — including inside CTEs.
+  can prove them — including inside CTEs, and for upstream nodes the lines that
+  *feed* your selection.
 - If a model's columns can't be resolved, the app says *why* (and when
   `dbt docs generate` would fix it).
 

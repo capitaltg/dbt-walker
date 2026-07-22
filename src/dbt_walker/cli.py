@@ -101,40 +101,142 @@ def _upstream_prereqs(graph: Graph, root: str) -> list[str]:
     return graph.topo_order(ancestors)
 
 
-def _ddl_entries(graph: Graph, full_refresh):
-    """An explicit DROP per full-refresh table (frees disk before the rebuild,
-    which matters for very large tables). A DROP ... CASCADE also removes
-    downstream views, so each statement is annotated with the views it takes out.
+def _classify_downstream(graph: Graph, model_uids, additive: bool):
+    """Split target+downstream models into (full_refresh, absorbs, rebuild), in
+    topological order.
+
+    Incrementals need a full refresh, EXCEPT under --additive an append/sync
+    incremental *absorbs* the added column (the next normal run adds it; existing
+    rows get NULL) -> its own bucket, so that assumption is visible rather than a
+    silent reclassification. Views and tables always rebuild for free.
     """
-    ddl = []
-    for uid in full_refresh:
+    full_refresh, absorbs, rebuild = [], [], []
+    for uid in graph.topo_order(set(model_uids)):
+        if graph.materialization(uid) != "incremental":
+            rebuild.append(uid)
+        elif additive and (graph.on_schema_change(uid) or "ignore") in SCHEMA_CHANGE_SAFE:
+            absorbs.append(uid)
+        else:
+            full_refresh.append(uid)
+    return full_refresh, absorbs, rebuild
+
+
+def _upstream_incrementals(graph: Graph, cg, root: str, columns) -> list[str]:
+    """Incremental ancestors on the columns' lineage (topo order). With no
+    columns, every incremental ancestor. Fails closed: where a column's lineage
+    dead-ends at an opaque model, include ALL incrementals above that model
+    (we can't prune what we can't trace)."""
+    if not columns:
+        return _upstream_prereqs(graph, root)
+    from dbt_walker.columns import UNKNOWN
+    lineage: set[str] = set()
+    opaque: set[str] = set()
+    for col in columns:
+        for e in cg.upstream(root, col).edges:
+            if e["parent"] is not None:
+                lineage.add(e["parent"])
+            elif e["transform"] == UNKNOWN:  # dead-end (external terminals excluded)
+                opaque.add(e["model"])
+    for m in opaque:
+        lineage |= set(graph.walk(m, "up"))
+    lineage.discard(root)  # the target is tagged separately in the drop list
+    incs = {u for u in lineage if graph.materialization(u) == "incremental"}
+    return graph.topo_order(incs)
+
+
+def _drop_list(graph: Graph, upstream_incs, downstream_full_refresh, root: str):
+    """Merge upstream + target + downstream incrementals into ONE topo-ordered
+    DROP list. Each row is tagged by position and carries db-less DROP DDL (you
+    are connected to the database) plus the views a CASCADE would take out."""
+    position: dict[str, str] = {u: "upstream" for u in upstream_incs}
+    for u in downstream_full_refresh:
+        position[u] = "target" if u == root else "downstream"
+    entries = []
+    for uid in graph.topo_order(set(position)):
+        rel = graph.relation_schema_table(uid)
         victims = [d for d in graph.walk(uid, "down") if graph.materialization(d) == "view"]
-        ddl.append(
-            {
-                "statement": f"DROP TABLE {graph.relation(uid)} CASCADE;",
-                "relation": graph.relation(uid),
-                "model": uid,
-                "cascade_drops_views": sorted(victims),
-            }
-        )
-    return ddl
+        entries.append({
+            "model": uid,
+            "name": graph.label(uid),
+            "position": position[uid],
+            "relation": rel,
+            "statement": f"DROP TABLE {rel} CASCADE;",
+            "cascade_drops_views": sorted(victims),
+        })
+    return entries
 
 
-def _print_refresh_plan(graph: Graph, full_refresh, ddl, changed_label) -> None:
-    print("\nSuggested commands (safe: atomic swap, needs ~2x storage during rebuild):")
-    if full_refresh:
-        names = " ".join(graph.label(u) for u in full_refresh)
+def _absorb_note(graph: Graph, uid: str) -> str:
+    osc = graph.on_schema_change(uid) or "ignore"
+    return f"  ~ {graph.label(uid)}  [{osc}]"
+
+
+def _render_impact(graph: Graph, root: str, columns, drop, absorbs, rebuild,
+                   tests, exposures, snapshots) -> None:
+    """The unified impact plan: one merged DROP list (upstream/target/downstream),
+    the absorbs bucket, free rebuilds, and both refresh paths (DDL + dbt)."""
+    head = _fmt(graph, root)
+    if columns:
+        head += "   column(s): " + ", ".join(columns)
+    print(f"Changing: {head}\n")
+
+    if drop:
+        print(f"DROP THESE ({len(drop)}) - topo order; a dropped incremental is rebuilt")
+        print("from scratch by the next scheduled run. Drop the ones you changed, or")
+        print("whose history you don't trust:")
+        for i, e in enumerate(drop, 1):
+            print(f"  {i}. {e['name']:<26} {e['position']:<10} {e['statement']}")
+            if e["cascade_drops_views"]:
+                views = ", ".join(graph.label(v) for v in e["cascade_drops_views"])
+                print(f"       -- CASCADE also drops views: {views}")
+        print()
+    if absorbs:
+        print(f"ABSORBS SCHEMA CHANGE ({len(absorbs)}) - the next normal run adds the column;")
+        print("existing rows get NULL. Full-refresh anyway if you need it backfilled:")
+        for uid in absorbs:
+            print(_absorb_note(graph, uid))
+        print()
+    if rebuild:
+        print(f"Rebuild normally ({len(rebuild)}) - views/tables, the run handles them:")
+        for uid in rebuild:
+            print(f"  - {_fmt(graph, uid)}")
+        print()
+    if tests:
+        print(f"Tests that re-run: {len(tests)}")
+    if exposures:
+        print("Exposures affected: " + ", ".join(graph.label(u) for u in exposures))
+    if snapshots:
+        print("Snapshots downstream (check-cols/timestamp may capture bogus diffs): "
+              + ", ".join(graph.label(u) for u in snapshots))
+    if not (drop or absorbs or rebuild):
+        print("Nothing to refresh.")
+        return
+
+    print("\nOr rebuild with dbt (safe atomic swap, ~2x storage during rebuild):")
+    if drop:
+        names = " ".join(e["name"] for e in drop)
         print(f"  dbt run --select {names} --full-refresh")
-    print(f"  dbt build --select {changed_label}+")
-    if ddl:
-        print("\nDDL alternative (drop now, rebuild later - frees disk immediately,")
-        print("but the table is gone until rebuilt and a failed rebuild leaves nothing):")
-        for entry in ddl:
-            print(f"  {entry['statement']}")
-            if entry["cascade_drops_views"]:
-                views = ", ".join(graph.label(v) for v in entry["cascade_drops_views"])
-                print(f"    !! CASCADE also drops downstream views: {views}")
-                print("       (rebuild them with the dbt command above)")
+    print(f"  dbt build --select {graph.label(root)}+")
+
+
+def _impact_json(root, columns, drop, absorbs, rebuild, tests, exposures,
+                 snapshots, unknown_models=None) -> dict:
+    payload = {
+        "changed": root,
+        "drop_list": drop,
+        "absorbs": absorbs,
+        "rebuild": rebuild,
+        # back-compat: the old keys, derived from the merged list
+        "upstream_prerequisites": [e["model"] for e in drop if e["position"] == "upstream"],
+        "full_refresh": [e["model"] for e in drop if e["position"] != "upstream"],
+        "tests": tests,
+        "exposures": exposures,
+        "snapshots": snapshots,
+    }
+    if columns is not None:
+        payload["columns"] = columns
+        payload["unknown_models"] = sorted(unknown_models or [])
+    return payload
 
 
 def cmd_impact(args: argparse.Namespace) -> None:
@@ -163,59 +265,15 @@ def cmd_impact(args: argparse.Namespace) -> None:
         elif rtype == "snapshot":
             snapshots.append(uid)
 
-    full_refresh, rebuild_only = _classify_models(graph, models, args.additive)
-    ddl = _ddl_entries(graph, full_refresh)
-    prereqs = _upstream_prereqs(graph, root)
+    full_refresh, absorbs, rebuild = _classify_downstream(graph, models, args.additive)
+    upstream_incs = _upstream_incrementals(graph, None, root, None)
+    drop = _drop_list(graph, upstream_incs, full_refresh, root)
 
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "changed": root,
-                    "upstream_prerequisites": prereqs,
-                    "full_refresh": full_refresh,
-                    "rebuild": rebuild_only,
-                    "snapshots": snapshots,
-                    "tests": tests,
-                    "exposures": exposures,
-                    "ddl": ddl,
-                },
-                indent=2,
-            )
-        )
+        print(json.dumps(_impact_json(root, None, drop, absorbs, rebuild,
+                                      tests, exposures, snapshots), indent=2))
         return
-
-    print(f"Changing: {_fmt(graph, root)}\n")
-    if prereqs:
-        print("BEFORE rebuilding, upstream incrementals that gate its history")
-        print("(a rebuild is only as complete as what these hold) - refresh order:")
-        for i, uid in enumerate(prereqs, 1):
-            print(f"  {i}. {_fmt(graph, uid)}")
-        print()
-    if full_refresh:
-        print("Incremental models needing FULL REFRESH (topological order):")
-        for uid in full_refresh:
-            print(f"  ! {_fmt(graph, uid)}   ({graph.relation(uid)})")
-    if rebuild_only:
-        label = "Models to rebuild (normal run is enough):"
-        print(("\n" if full_refresh else "") + label)
-        for uid in rebuild_only:
-            print(f"  - {_fmt(graph, uid)}")
-    if snapshots:
-        print("\nSnapshots downstream (check-cols/timestamp logic may capture bogus diffs):")
-        for uid in snapshots:
-            print(f"  * {_fmt(graph, uid)}")
-    if tests:
-        print(f"\nDownstream tests that will re-run: {len(tests)}")
-    if exposures:
-        print("\nExposures (dashboards/apps) affected:")
-        for uid in exposures:
-            print(f"  @ {graph.label(uid)}")
-    if not down:
-        print("Nothing downstream - leaf model.")
-        return
-
-    _print_refresh_plan(graph, full_refresh, ddl, graph.label(root))
+    _render_impact(graph, root, None, drop, absorbs, rebuild, tests, exposures, snapshots)
 
 
 # --------------------------------------------------------------- column lineage
@@ -243,7 +301,9 @@ def _catalog_note(cg) -> None:
 
 def _check_column(cg, graph: Graph, uid: str, column: str) -> None:
     mc = cg.columns_of(uid)
-    if mc.resolved and column not in mc.columns:
+    # a passthrough (`select *`) model has no enumerable column list to validate
+    # against — any column may pass through, so we can't reject one
+    if mc.resolved and mc.passthrough is None and column not in mc.columns:
         have = ", ".join(sorted(mc.columns)) or "(none)"
         raise GraphError(f"{graph.label(uid)} has no column {column!r}. Columns: {have}")
 
@@ -260,10 +320,14 @@ def cmd_col_upstream(args: argparse.Namespace) -> None:
     print(f"{graph.label(uid)}.{args.column}")
     for e in trace.edges:
         indent = "  " * e["distance"]
-        if e["parent"] is None or e["transform"] == "unknown":
-            print(f"{indent}<- (lineage unknown - cannot trace further)")
-        else:
+        if e["parent"] is not None:
             print(f"{indent}<- {graph.label(e['parent'])}.{e['parent_column']}  [{e['transform']}]")
+        elif e.get("parent_relation"):
+            # resolved to a real relation that isn't a dbt node (cross-db table,
+            # unmanaged source): we know where it comes from, it's just off-project
+            print(f"{indent}<- {e['parent_relation']}.{e['parent_column']}  [external]")
+        else:
+            print(f"{indent}<- (lineage unknown - cannot trace further)")
     if not trace.edges:
         print("  (no upstream columns - literal or count(*))")
 
@@ -305,65 +369,33 @@ def cmd_col_downstream(args: argparse.Namespace) -> None:
 def _impact_column(graph: Graph, root: str, args: argparse.Namespace) -> None:
     cg = _column_graph(graph, args)
     _check_column(cg, graph, root, args.column)
+    columns = [args.column]
     taint = cg.taint_downstream(root, args.column)
     affected_models = [u for u in taint.affected if graph.resource_type(u) == "model"]
     if graph.resource_type(root) == "model" and root not in affected_models:
         affected_models.append(root)  # the changed model itself must be rebuilt
 
-    full_refresh, rebuild_only = _classify_models(graph, affected_models, args.additive)
-    ddl = _ddl_entries(graph, full_refresh)
+    full_refresh, absorbs, rebuild = _classify_downstream(graph, affected_models, args.additive)
+    upstream_incs = _upstream_incrementals(graph, cg, root, columns)
+    drop = _drop_list(graph, upstream_incs, full_refresh, root)
+
     affected = set(affected_models)
-    # tests / exposures that hang off an affected model
-    tests, exposures = [], []
+    tests, exposures, snapshots = [], [], []
     for uid in graph.walk(root, "down"):
         rtype = graph.resource_type(uid)
-        if rtype in ("test", "exposure") and affected.intersection(graph.parents.get(uid, [])):
-            (tests if rtype == "test" else exposures).append(uid)
+        if rtype in ("test", "exposure", "snapshot") and affected.intersection(graph.parents.get(uid, [])):
+            bucket = tests if rtype == "test" else exposures if rtype == "exposure" else snapshots
+            bucket.append(uid)
 
-    total_models = sum(
-        1 for u in graph.walk(root, "down") if graph.resource_type(u) == "model"
-    )
     if args.json:
-        print(json.dumps(
-            {
-                "changed": root,
-                "column": args.column,
-                "full_refresh": full_refresh,
-                "rebuild": rebuild_only,
-                "tests": tests,
-                "exposures": exposures,
-                "ddl": ddl,
-                "unknown_models": sorted(taint.unknown_models),
-            },
-            indent=2,
-        ))
+        print(json.dumps(_impact_json(root, columns, drop, absorbs, rebuild, tests,
+                                      exposures, snapshots, taint.unknown_models), indent=2))
         return
-
-    print(f"Changing column: {graph.label(root)}.{args.column}\n")
-    print(f"{len(affected_models)} of {total_models} downstream models read this column.")
+    _render_impact(graph, root, columns, drop, absorbs, rebuild, tests, exposures, snapshots)
     if taint.unknown_models:
-        print(f"({len(taint.unknown_models)} included conservatively - lineage unresolved.)")
-    print()
-    if full_refresh:
-        print("Incremental models needing FULL REFRESH (topological order):")
-        for uid in full_refresh:
-            mark = " [lineage unknown]" if uid in taint.unknown_models else ""
-            print(f"  ! {_fmt(graph, uid)}   ({graph.relation(uid)}){mark}")
-    if rebuild_only:
-        print(("\n" if full_refresh else "") + "Models to rebuild (normal run is enough):")
-        for uid in rebuild_only:
-            mark = " [lineage unknown]" if uid in taint.unknown_models else ""
-            print(f"  - {_fmt(graph, uid)}{mark}")
-    if tests:
-        print(f"\nDownstream tests that will re-run: {len(tests)}")
-    if exposures:
-        print("\nExposures (dashboards/apps) affected:")
-        for uid in exposures:
-            print(f"  @ {graph.label(uid)}")
-    if not affected_models:
-        print("No downstream model reads this column - nothing to refresh.")
-        return
-    _print_refresh_plan(graph, full_refresh, ddl, graph.label(root))
+        print("\nIncluded conservatively - lineage unresolved (fail closed):")
+        for u in sorted(taint.unknown_models):
+            print(f"  ? {graph.label(u)}")
 
 
 # ------------------------------------------------------------------ graph/diff
@@ -387,7 +419,10 @@ def _column_selection(graph: Graph, args: argparse.Namespace):
         if not mc.resolved:
             return "unknown"
         edges = mc.columns.get(col)
-        return edges[0].transform if edges else None
+        if edges:
+            return edges[0].transform
+        # a passthrough chain passes any non-computed column through by name
+        return "passthrough" if mc.passthrough is not None else None
 
     nodes = {root}
     columns: dict[str, set] = {root: {args.column}}

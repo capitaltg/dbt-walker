@@ -87,6 +87,7 @@ def collect(graph: Graph, project_root: Path, dialect: str | None = None,
             "mat": graph.materialization(uid),
             "osc": graph.on_schema_change(uid),
             "relation": graph.relation(uid),
+            "rel_st": graph.relation_schema_table(uid),  # db-less, for DROP DDL
             "folder": _folder(node),
             "path": str(node.get("original_file_path") or ""),
         }
@@ -133,12 +134,18 @@ def collect(graph: Graph, project_root: Path, dialect: str | None = None,
             entry = {
                 "resolved": mc.resolved,
                 "cols": {
-                    col: [[e.parent, e.column, e.transform] for e in edges]
+                    # [parent_uid, parent_column, transform, external_relation]
+                    col: [[e.parent, e.column, e.transform, e.parent_rel] for e in edges]
                     for col, edges in mc.columns.items()
                 },
                 "spans": {c: [[a, b] for a, b in ranges]
                           for c, ranges in spans.items() if c in mc.columns},
             }
+            if mc.passthrough is not None:
+                # a `select *` chain: any column not in `cols` passes through by
+                # name to this terminal (a dbt node, or an external relation)
+                entry["passthrough"] = {"parent": cg.relation_uid(mc.passthrough),
+                                        "rel": mc.passthrough}
             if not mc.resolved:
                 # why it didn't resolve, so the picker can nudge toward a remedy
                 entry["why"] = unresolved_reason(graph, uid, cg.dialect)

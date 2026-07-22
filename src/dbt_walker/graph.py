@@ -87,6 +87,14 @@ class Graph:
         parts = [node.get("database"), node.get("schema"), node.get("alias") or node.get("name")]
         return ".".join(p for p in parts if p)
 
+    def relation_schema_table(self, uid: str) -> str:
+        """schema.identifier without the database qualifier — for DROP DDL, where
+        you're connected to the database and cross-database DDL isn't a thing
+        (Redshift/Postgres). Falls back to the bare identifier if no schema."""
+        node = self.nodes.get(uid) or {}
+        parts = [node.get("schema"), node.get("alias") or node.get("name")]
+        return ".".join(p for p in parts if p)
+
     def raw_sql(self, uid: str) -> str | None:
         """The model's SQL as written (jinja/refs/macros), from the manifest."""
         return (self.nodes.get(uid) or {}).get("raw_code") or None

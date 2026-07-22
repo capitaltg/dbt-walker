@@ -33,7 +33,7 @@ def test_payload_shape():
     sample = next(c for c in p["columns"].values() if c["resolved"] and c["cols"])
     edges = next(iter(sample["cols"].values()))
     if edges:
-        assert len(edges[0]) == 3  # [parent, column, transform]
+        assert len(edges[0]) == 4  # [parent, column, transform, external_relation]
 
 
 @needs(SYNTH_SMALL, GEN_SMALL_CMD)
@@ -75,8 +75,9 @@ def test_build_app_writes_self_contained_file(tmp_path):
     assert "cdn.jsdelivr.net" not in html
     assert "<script src=" not in html
     # the three panes and the controls are present
-    for marker in ('class="pane tree"', 'id="graph"', 'class="pane detail"',
-                   'id="modeSeg"', 'id="colChips"', 'id="treeSearch"'):
+    for marker in ('class="pane rail-pane"', 'id="graph"', 'class="pane detail"',
+                   'id="modeSeg"', 'id="colChips"', 'id="treeSearch"', 'class="rail"',
+                   'class="graph-toolbar"'):
         assert marker in html, marker
     # empty states teach what populates each pane (design Q1)
     assert "Select a model" in html and "Click a node" in html
