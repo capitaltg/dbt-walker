@@ -103,12 +103,29 @@ traced **by name**, no inventory needed — so a column threaded through several
 `select *` layers still resolves offline. Genuinely ambiguous cases (a `select *`
 over a *join*) still fail closed.
 
+![Animated demo of the dbt-walker offline HTML lineage explorer time-travelling the column net_income_ttm up its comes-from chain across three real models, with the exact producing SQL line highlighted amber at each upstream hop.](https://raw.githubusercontent.com/Hugs401/dbt-walker/main/docs/img/demo-column-trace.gif)
+
+*Time-travel a column through real production SQL (here in the visual explorer).
+Pick `net_income_ttm` on `stock_picks`, then click down its "comes from" chain —
+`int_income_pivoted_to_stock`, then `stg_tushare_income_statement`, then the raw
+Tushare source — and the exact line that produces the column lights up at every
+hop, renames and all (`n_income_attr_p as net_income_exclude_minority`).*
+
 If `target/catalog.json` exists (from `dbt docs generate`), the column
 commands additionally use its per-relation column inventories to resolve the
 harder cases — unqualified columns across joins. It's per-relation and
 best-effort: a partial or missing catalog just means those relations resolve as
 before, and a stale catalog is a warning, never a hard stop. Reading it never
 touches the warehouse.
+
+![Animated demo: without catalog.json, dbt-walker marks unprovable column lineage as hatched-grey "unproven" and warns "12 of 12 could not be traced"; after dbt docs generate, the same lineage renders as solid amber, fully proven.](https://raw.githubusercontent.com/Hugs401/dbt-walker/main/docs/img/demo-fail-closed.gif)
+
+*dbt-walker never calls a change "safe" on faith. When a model is `select *`
+over a join, column lineage it can't prove is drawn in hatched grey, flagged
+"could not be traced," and kept inside the blast radius rather than quietly
+dropped from it. Run `dbt docs generate` so `target/catalog.json` exists,
+rebuild the app, and that same lineage turns solid amber — now proven, edge by
+edge, all the way back to source.*
 
 ### Graphs and diffs
 
@@ -135,6 +152,13 @@ One self-contained HTML file, open it in any browser. The expensive analysis
 all traversal — lineage walks, impact classification, column taint,
 SQL highlighting — runs on demand in the browser. No server, no network.
 
+![Animated demo of dbt-walker's offline lineage explorer in Impact mode: picking column col_0 of model int_38 produces a grouped, ordered DROP TABLE list for the incrementals int_11 and int_24 (upstream) and int_38 (the target) along the seed_0 to int_38 lineage chain.](https://raw.githubusercontent.com/Hugs401/dbt-walker/main/docs/img/demo-droplist.gif)
+
+*The founding question, answered. Change `col_0` in `int_38` and Impact mode
+walks that column's lineage and returns an ordered, grouped **drop list** —
+`int_11` and `int_24` upstream, `int_38` the target — with each group's
+`DROP TABLE` statements ready to copy and each model badged in the graph.*
+
 Inside:
 
 - A searchable **model tree** and a pan/zoom **lineage graph**. Click a node to
@@ -154,6 +178,14 @@ Inside:
   *feed* your selection.
 - If a model's columns can't be resolved, the app says *why* (and when
   `dbt docs generate` would fix it).
+
+![Animated demo of the dbt-walker lineage explorer: a node is clicked to inspect it (cyan ring, edges, and SQL), then Ctrl+clicked to re-target, re-centering the graph and recomputing the drop list, repeated one hop further upstream.](https://raw.githubusercontent.com/Hugs401/dbt-walker/main/docs/img/demo-retarget.gif)
+
+*Click any node to inspect it — a cyan ring lights up, its proximal edges glow,
+and its compiled SQL springs open in the Detail pane. Ctrl+click the same node
+to make it the target: the graph re-centers, the drop list recomputes, and the
+whole analysis follows you upstream. Navigation is the analysis — you never
+leave the graph.*
 
 `build-app` never runs dbt for you — if `target/` is missing it tells you to
 compile, and if model files are newer than the manifest it stamps a staleness
